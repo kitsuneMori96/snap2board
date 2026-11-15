@@ -31,6 +31,8 @@ pc/Snap2Board/bin/Debug/net10.0-windows/Snap2Board.exe --pair <手机上的6位�
 # 开机自启（也可在托盘菜单里勾选）
 Snap2Board.exe --autostart on|off
 Snap2Board.exe --panel            # 启动时直接打开面板（平时双击托盘图标即可）
+Snap2Board.exe --host 192.168.x.x[:28642]        # 手动指定 hub
+Snap2Board.exe --diag             # 生成 diag.txt 自检报告并打开
 ```
 
 ## 计划

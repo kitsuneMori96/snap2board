@@ -1,8 +1,5 @@
 using System.Diagnostics;
 using System.Drawing;
-using System.Net;
-using System.Net.NetworkInformation;
-using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Windows.Forms;
 
@@ -28,6 +25,8 @@ internal sealed class TrayApp : ApplicationContext
     private string _statusText = "未连接";
     private DateTime? _lastSyncAt;
     private PanelForm? _panel;
+    private DateTime _lastProbeLogAt;
+    private string _lastProbeNote = "";
 
     internal string StatusText => _statusText;
 
@@ -63,6 +62,7 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("面板…", null, (_, _) => ShowPanel()));
         menu.Items.Add(new ToolStripMenuItem("配对…", null, (_, _) => PromptPair()));
+        menu.Items.Add(new ToolStripMenuItem("指定地址…", null, (_, _) => PromptHost()));
         menu.Items.Add(new ToolStripMenuItem("立即同步", null, (_, _) => ManualSync()));
         menu.Items.Add(_pushItem);
         menu.Items.Add(new ToolStripMenuItem("上传当前剪贴板", null, (_, _) => ManualUpload()));
@@ -252,13 +252,35 @@ internal sealed class TrayApp : ApplicationContext
 
     private void ApplyHostArgument(string value)
     {
-        var parts = value.Split(':');
-        _config.Host = parts[0];
-        if (parts.Length > 1 && int.TryParse(parts[1], out var port))
+        var parts = value.Trim().Split(':');
+        if (parts.Length == 0 || string.IsNullOrWhiteSpace(parts[0])) return;
+        _config.Host = parts[0].Trim();
+        if (parts.Length > 1 && int.TryParse(parts[1], out var port) && port is > 0 and < 65536)
         {
             _config.Port = port;
-            _config.Save();
         }
+        _config.Save();
+    }
+
+    internal void PromptHost()
+    {
+        using var dialog = new HostDialog($"{_config.Host}:{_config.Port}");
+        if (dialog.ShowDialog() != DialogResult.OK || dialog.Address.Length == 0) return;
+        ApplyHostArgument(dialog.Address);
+        _connected = false;
+        AppLog.Info($"手动指定 hub 地址: {_config.Host}:{_config.Port}");
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var host = await DiscoverAsync(_cts.Token);
+                SetStatus(host == null ? "未连接" : $"已连接 {host}:{_config.Port}");
+            }
+            catch (Exception ex)
+            {
+                AppLog.Info($"指定地址后连接失败: {ex.Message}");
+            }
+        });
     }
 
     private async Task PollLoopAsync(CancellationToken ct)
@@ -362,6 +384,7 @@ internal sealed class TrayApp : ApplicationContext
         HubItem? newest = null;
         string? newestPath = null;
         var pulled = 0;
+        var seenThisBatch = new HashSet<string>();
         foreach (var item in items)
         {
             if (item.Origin == "windows")
@@ -369,6 +392,13 @@ internal sealed class TrayApp : ApplicationContext
                 _config.Cursor = item.Seq;
                 _config.Save();
                 AppLog.Info($"跳过回传 #{item.Seq} {item.Name}（PC 自己上传的）");
+                continue;
+            }
+            if (item.Sha256.Length > 0 && !seenThisBatch.Add(item.Sha256))
+            {
+                _config.Cursor = item.Seq;
+                _config.Save();
+                AppLog.Info($"跳过同批重复 #{item.Seq} {item.Name}");
                 continue;
             }
             var path = await EnsureFileAsync(item, ct);
@@ -442,55 +472,45 @@ internal sealed class TrayApp : ApplicationContext
 
     private async Task<string?> DiscoverAsync(CancellationToken ct)
     {
-        foreach (var candidate in Candidates())
+        // 并行探测：候选里有不通的网关时不用一个个等超时
+        var candidates = Discovery.Candidates(_config.Host).ToList();
+        var probes = candidates.Select(async candidate =>
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(TimeSpan.FromMilliseconds(800));
-            var health = await _hub.ProbeAsync(candidate, _config.Port, timeout.Token);
-            if (health != null)
+            timeout.CancelAfter(TimeSpan.FromMilliseconds(1500));
+            var (health, error) = await _hub.ProbeAsync(candidate, _config.Port, timeout.Token);
+            return (candidate, health, error);
+        }).ToList();
+        var results = await Task.WhenAll(probes);
+
+        foreach (var (candidate, health, _) in results)
+        {
+            if (health == null) continue;
+            _host = candidate;
+            _connected = true;
+            _lastProbeNote = "";
+            if (_config.Host != candidate)
             {
-                _host = candidate;
-                _connected = true;
-                if (_config.Host != candidate)
-                {
-                    _config.Host = candidate;
-                    _config.Save();
-                }
-                AppLog.Info($"发现 hub: {candidate}:{_config.Port} ({health.Device})");
-                return candidate;
+                _config.Host = candidate;
+                _config.Save();
             }
-            if (ct.IsCancellationRequested) return null;
+            AppLog.Info($"发现 hub: {candidate}:{_config.Port} ({health.Device})");
+            return candidate;
+        }
+
+        // 探测失败每 30 秒记一次，方便对着日志排查「未连接」
+        var failures = results
+            .Where(r => r.health == null)
+            .Select(r => $"{r.candidate}: {r.error}")
+            .ToList();
+        var note = string.Join("；", failures);
+        if (failures.Count > 0 && (note != _lastProbeNote || DateTime.Now - _lastProbeLogAt > TimeSpan.FromSeconds(30)))
+        {
+            _lastProbeNote = note;
+            _lastProbeLogAt = DateTime.Now;
+            AppLog.Info($"未发现 hub，候选 {failures.Count} 个：{note}");
         }
         return null;
-    }
-
-    private IEnumerable<string> Candidates()
-    {
-        var seen = new HashSet<string>();
-        if (!string.IsNullOrWhiteSpace(_config.Host) && seen.Add(_config.Host))
-        {
-            yield return _config.Host;
-        }
-        if (seen.Add("127.0.0.1"))
-        {
-            yield return "127.0.0.1";
-        }
-        foreach (var network in NetworkInterface.GetAllNetworkInterfaces())
-        {
-            if (network.OperationalStatus != OperationalStatus.Up) continue;
-            if (network.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
-            foreach (var gateway in network.GetIPProperties().GatewayAddresses)
-            {
-                var address = gateway.Address;
-                if (address.AddressFamily != AddressFamily.InterNetwork) continue;
-                if (address.Equals(IPAddress.Any)) continue;
-                var text = address.ToString();
-                if (seen.Add(text))
-                {
-                    yield return text;
-                }
-            }
-        }
     }
 
     internal void PromptPair()

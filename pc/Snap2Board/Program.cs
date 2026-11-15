@@ -2,7 +2,7 @@ using System.Windows.Forms;
 
 namespace Snap2Board;
 
-internal sealed record CliOptions(string? PairCode, string? Host, string? AutoStart, bool ShowPanel)
+internal sealed record CliOptions(string? PairCode, string? Host, string? AutoStart, bool ShowPanel, bool Diag)
 {
     public static CliOptions Parse(string[] args)
     {
@@ -10,6 +10,7 @@ internal sealed record CliOptions(string? PairCode, string? Host, string? AutoSt
         string? host = null;
         string? autoStart = null;
         var showPanel = false;
+        var diag = false;
         for (var i = 0; i < args.Length; i++)
         {
             switch (args[i])
@@ -26,9 +27,12 @@ internal sealed record CliOptions(string? PairCode, string? Host, string? AutoSt
                 case "--panel":
                     showPanel = true;
                     break;
+                case "--diag":
+                    diag = true;
+                    break;
             }
         }
-        return new CliOptions(pairCode, host, autoStart, showPanel);
+        return new CliOptions(pairCode, host, autoStart, showPanel, diag);
     }
 }
 
@@ -38,6 +42,11 @@ internal static class Program
     private static void Main(string[] args)
     {
         var options = CliOptions.Parse(args);
+        if (options.Diag)
+        {
+            Diagnostics.Run();
+            return;
+        }
         if (options.AutoStart is { } autoStart)
         {
             AutoStart.Set(autoStart.Equals("on", StringComparison.OrdinalIgnoreCase));

@@ -36,7 +36,7 @@
                                 │ 手机热点 AP（网关 192.168.43.x）
                                 │ Surface 只做出站连接
 ┌───────────────────────────────┴──── Surface Go (Client) ────────────┐
-│  HubClient ── 读默认网关 → 探测 /health → WS 长连 + since 游标        │
+│  HubClient ── 并发探测候选地址 /health → 轮询 since 游标                  │
 │      │                                                             │
 │      ├─► 下载图片 → 原子落盘 → ClipboardWriter(DIB+PNG+FileDrop)     │
 │      └─► ClipboardWatcher(WM_CLIPBOARDUPDATE) → 回声表 → POST /items │
@@ -59,8 +59,9 @@
 
 ### 2.2 Windows（Client）
 
-- **GatewayDiscovery**：枚举所有 IPv4 网卡的默认网关，逐个探测 `GET /health`，应答且 `service == "snap2board"` 者即为 hub。同时持久化「上次可用地址」，网络变化/唤醒时先试旧地址。托盘另提供「手动指定 host:port」，兜底 USB 网络共享等非热点场景。
-- **HubClient**：WS 长连（30s ping），断线指数退避重连；每次连上先 `GET /items?since=<cursor>` 补齐。
+- **GatewayDiscovery**：候选地址 = 上次可用地址 + 127.0.0.1 + 所有 IPv4 网卡的默认网关（去重），并发探测 `GET /health`（各 1.5 s 超时），应答且 `service == "snap2board"` 者即为 hub。托盘另提供「指定地址…」，兜底 USB 网络共享等非热点场景。
+- **Diagnostics**：`--diag` 写 `%LOCALAPPDATA%\Snap2Board\diag.txt` 并打开记事本，列出网卡/网关/配置（不写 token）+ 逐个候选的探测结果，用于在陌生电脑上一分钟定位连不上的原因。
+- **HubClient**：轮询 `GET /items?since=<cursor>` 补齐；跳过 `origin == windows` 的回声项，并在同一批内按 sha256 去重（手机端监听可能对同一 uri 重复入队）。
 - **Store**：`%LOCALAPPDATA%\Snap2Board\media\<yyyyMM>\<sha256>.<ext>`，`.tmp` → rename 原子落盘。
 - **ClipboardWriter**：独立 STA 线程 + 串行队列；`OpenClipboard` 失败重试 10×20ms。
 - **ClipboardWatcher**：隐藏窗口 + `AddClipboardFormatListener`，收 `WM_CLIPBOARDUPDATE`。

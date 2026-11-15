@@ -28,25 +28,33 @@ internal sealed class HubClient
         Timeout = TimeSpan.FromSeconds(30)
     };
 
-    public async Task<HubHealth?> ProbeAsync(string host, int port, CancellationToken ct)
+    public async Task<(HubHealth? Health, string Error)> ProbeAsync(string host, int port, CancellationToken ct)
     {
         try
         {
             using var response = await _http.GetAsync($"http://{host}:{port}/api/v1/health", ct);
-            if (!response.IsSuccessStatusCode) return null;
+            if (!response.IsSuccessStatusCode) return (null, $"HTTP {(int)response.StatusCode}");
             using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
             var root = json.RootElement;
             if (!root.TryGetProperty("service", out var service) || service.GetString() != "snap2board")
             {
-                return null;
+                return (null, "端口上有响应但不是 snap2board");
             }
             var device = root.TryGetProperty("device", out var d) ? d.GetString() ?? "" : "";
             var p = root.TryGetProperty("port", out var pr) ? pr.GetInt32() : port;
-            return new HubHealth(device, p);
+            return (new HubHealth(device, p), "");
         }
-        catch
+        catch (OperationCanceledException)
         {
-            return null;
+            return (null, "超时（1.5s 内无响应）");
+        }
+        catch (HttpRequestException ex)
+        {
+            return (null, ex.Message);
+        }
+        catch (Exception ex)
+        {
+            return (null, $"{ex.GetType().Name}: {ex.Message}");
         }
     }
 
