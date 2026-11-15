@@ -5,16 +5,18 @@ namespace Snap2Board;
 
 internal sealed class PanelForm : Form
 {
+    private static readonly Size ThumbSize = new(64, 64);
+
     private readonly TrayApp _app;
     private readonly Label _statusLabel = new();
     private readonly Label _detailLabel = new();
-    private readonly ListView _list = new();
+    private readonly DataGridView _grid = new();
     private readonly PictureBox _preview = new();
-    private readonly ImageList _thumbs = new() { ImageSize = new Size(64, 64), ColorDepth = ColorDepth.Depth32Bit };
-    private readonly Dictionary<string, int> _thumbIndex = new();
+    private readonly Dictionary<string, Image> _thumbCache = new();
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 1000 };
     private string _listSignature = "";
     private bool _allowClose;
+    private Image? _placeholder;
 
     public PanelForm(TrayApp app)
     {
@@ -26,7 +28,7 @@ internal sealed class PanelForm : Form
         Text = "Snap2Board";
         Width = 760;
         Height = 600;
-        MinimumSize = new Size(420, 360);
+        MinimumSize = new Size(460, 360);
         StartPosition = FormStartPosition.CenterScreen;
         Icon = SystemIcons.Application;
 
@@ -48,18 +50,53 @@ internal sealed class PanelForm : Form
         header.Controls.Add(_statusLabel);
         header.Controls.Add(_detailLabel);
 
-        _list.View = View.Details;
-        _list.FullRowSelect = true;
-        _list.MultiSelect = false;
-        _list.HideSelection = false;
-        _list.Dock = DockStyle.Fill;
-        _list.SmallImageList = _thumbs;
-        _list.Columns.Add("缩略图", 68);
-        _list.Columns.Add("时间", 130);
-        _list.Columns.Add("序号", 46);
-        _list.Columns.Add("文件名", 192);
-        _list.DoubleClick += (_, _) => RestoreSelected();
-        _list.SelectedIndexChanged += (_, _) => UpdatePreview();
+        _grid.Dock = DockStyle.Fill;
+        _grid.ReadOnly = true;
+        _grid.AllowUserToAddRows = false;
+        _grid.AllowUserToDeleteRows = false;
+        _grid.AllowUserToResizeRows = false;
+        _grid.AllowUserToOrderColumns = false;
+        _grid.RowHeadersVisible = false;
+        _grid.MultiSelect = false;
+        _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        _grid.BackgroundColor = Color.White;
+        _grid.BorderStyle = BorderStyle.None;
+        _grid.GridColor = Color.Gainsboro;
+        _grid.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
+        _grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
+        _grid.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleLeft;
+        _grid.RowTemplate.Height = 76;
+        _grid.Columns.Add(new DataGridViewImageColumn
+        {
+            HeaderText = "缩略图",
+            Width = 76,
+            ImageLayout = DataGridViewImageCellLayout.Zoom,
+            SortMode = DataGridViewColumnSortMode.NotSortable
+        });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            HeaderText = "时间",
+            Width = 140,
+            SortMode = DataGridViewColumnSortMode.NotSortable
+        });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            HeaderText = "序号",
+            Width = 50,
+            SortMode = DataGridViewColumnSortMode.NotSortable
+        });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            HeaderText = "文件名",
+            AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+            MinimumWidth = 120,
+            SortMode = DataGridViewColumnSortMode.NotSortable
+        });
+        _grid.CellDoubleClick += (_, e) =>
+        {
+            if (e.RowIndex >= 0) RestoreRow(e.RowIndex);
+        };
+        _grid.SelectionChanged += (_, _) => UpdatePreview();
 
         var listGroup = new GroupBox
         {
@@ -68,7 +105,7 @@ internal sealed class PanelForm : Form
             Padding = new Padding(8),
             Margin = new Padding(12, 0, 6, 8)
         };
-        listGroup.Controls.Add(_list);
+        listGroup.Controls.Add(_grid);
 
         _preview.SizeMode = PictureBoxSizeMode.Zoom;
         _preview.Dock = DockStyle.Fill;
@@ -89,6 +126,11 @@ internal sealed class PanelForm : Form
         lists.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
         lists.Controls.Add(listGroup, 0, 0);
         lists.Controls.Add(previewGroup, 1, 0);
+        lists.Resize += (_, _) =>
+        {
+            var previewWidth = Math.Max(200, (int)(lists.ClientSize.Width * 0.3));
+            lists.ColumnStyles[1].Width = previewWidth;
+        };
 
         var buttons = new FlowLayoutPanel
         {
@@ -142,13 +184,20 @@ internal sealed class PanelForm : Form
         return button;
     }
 
+    private int SelectedIndex()
+    {
+        return _grid.SelectedRows.Count > 0 && _grid.SelectedRows[0].Tag is int index ? index : -1;
+    }
+
     private void RestoreSelected()
     {
-        if (_list.SelectedItems.Count == 0) return;
-        if (_list.SelectedItems[0].Tag is int index)
-        {
-            _app.Restore(index);
-        }
+        var index = SelectedIndex();
+        if (index >= 0) _app.Restore(index);
+    }
+
+    private void RestoreRow(int rowIndex)
+    {
+        if (_grid.Rows[rowIndex].Tag is int index) _app.Restore(index);
     }
 
     private void RefreshView()
@@ -166,28 +215,26 @@ internal sealed class PanelForm : Form
             : $"{all.Count}|{all[0].Path}|{all[^1].Path}";
         if (signature == _listSignature) return signature;
 
-        var selected = _list.SelectedItems.Count > 0 && _list.SelectedItems[0].Tag is int i ? i : -1;
-        _list.BeginUpdate();
-        _list.Items.Clear();
+        var selected = SelectedIndex();
+        _grid.SuspendLayout();
+        _grid.Rows.Clear();
         for (var index = 0; index < all.Count; index++)
         {
             var entry = all[index];
             var stamp = entry.CapturedAt > 0
                 ? DateTimeOffset.FromUnixTimeMilliseconds(entry.CapturedAt).LocalDateTime
                 : File.GetLastWriteTime(entry.Path);
-            var item = new ListViewItem("") { ImageIndex = ThumbFor(entry) };
-            item.SubItems.Add(stamp.ToString("MM-dd HH:mm:ss"));
-            item.SubItems.Add(entry.Seq.ToString());
-            item.SubItems.Add(entry.Name);
-            item.Tag = index;
-            if (!File.Exists(entry.Path)) item.ForeColor = Color.Gray;
-            _list.Items.Add(item);
-            if (index == selected) item.Selected = true;
+            var row = _grid.Rows[_grid.Rows.Add(ThumbFor(entry), stamp.ToString("MM-dd HH:mm:ss"),
+                entry.Seq.ToString(), entry.Name)];
+            row.Height = 76;
+            row.Tag = index;
+            if (!File.Exists(entry.Path)) row.DefaultCellStyle.ForeColor = Color.Gray;
+            if (index == selected) row.Selected = true;
         }
-        _list.EndUpdate();
-        if (_list.Items.Count > 0 && _list.SelectedItems.Count == 0)
+        _grid.ResumeLayout();
+        if (_grid.Rows.Count > 0 && SelectedIndex() < 0)
         {
-            _list.Items[0].Selected = true;
+            _grid.Rows[0].Selected = true;
         }
         return signature;
     }
@@ -195,8 +242,8 @@ internal sealed class PanelForm : Form
     private void UpdatePreview()
     {
         Image? image = null;
-        if (_list.SelectedItems.Count > 0 && _list.SelectedItems[0].Tag is int index
-            && ClipboardHistory.Get(index) is { } entry && File.Exists(entry.Path))
+        var index = SelectedIndex();
+        if (index >= 0 && ClipboardHistory.Get(index) is { } entry && File.Exists(entry.Path))
         {
             try
             {
@@ -215,10 +262,10 @@ internal sealed class PanelForm : Form
         old?.Dispose();
     }
 
-    private int ThumbFor(HistoryEntry entry)
+    private Image ThumbFor(HistoryEntry entry)
     {
-        if (_thumbIndex.TryGetValue(entry.Path, out var cached)) return cached;
-        Image? thumb = null;
+        if (_thumbCache.TryGetValue(entry.Path, out var cached)) return cached;
+        Image thumb;
         try
         {
             // 先读进内存再解码，避免 Image.FromFile 长期占着文件
@@ -230,39 +277,35 @@ internal sealed class PanelForm : Form
         catch (Exception ex)
         {
             AppLog.Info($"缩略图加载失败 {entry.Name}: {ex.Message}");
+            thumb = _placeholder ??= PlaceholderThumb();
         }
-        thumb ??= PlaceholderThumb();
-        _thumbs.Images.Add(thumb);
-        var index = _thumbs.Images.Count - 1;
-        _thumbIndex[entry.Path] = index;
-        return index;
+        _thumbCache[entry.Path] = thumb;
+        return thumb;
     }
 
     // 等比缩放居中，别把竖屏截图压成正方形
-    private Bitmap FitThumb(Image source)
+    private static Bitmap FitThumb(Image source)
     {
-        var size = _thumbs.ImageSize;
-        var scale = Math.Min((double)size.Width / source.Width, (double)size.Height / source.Height);
+        var scale = Math.Min((double)ThumbSize.Width / source.Width, (double)ThumbSize.Height / source.Height);
         var w = Math.Max(1, (int)Math.Round(source.Width * scale));
         var h = Math.Max(1, (int)Math.Round(source.Height * scale));
-        var canvas = new Bitmap(size.Width, size.Height);
+        var canvas = new Bitmap(ThumbSize.Width, ThumbSize.Height);
         using var g = Graphics.FromImage(canvas);
         g.Clear(Color.White);
         g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-        g.DrawImage(source, (size.Width - w) / 2, (size.Height - h) / 2, w, h);
+        g.DrawImage(source, (ThumbSize.Width - w) / 2, (ThumbSize.Height - h) / 2, w, h);
         return canvas;
     }
 
-    private Bitmap PlaceholderThumb()
+    private static Bitmap PlaceholderThumb()
     {
-        var size = _thumbs.ImageSize;
-        var bitmap = new Bitmap(size.Width, size.Height);
+        var bitmap = new Bitmap(ThumbSize.Width, ThumbSize.Height);
         using var g = Graphics.FromImage(bitmap);
         g.Clear(Color.WhiteSmoke);
         using var pen = new Pen(Color.Gainsboro);
-        g.DrawRectangle(pen, 0, 0, size.Width - 1, size.Height - 1);
+        g.DrawRectangle(pen, 0, 0, ThumbSize.Width - 1, ThumbSize.Height - 1);
         using var font = new Font("Microsoft YaHei UI", 8f);
-        TextRenderer.DrawText(g, "缺失", font, new Rectangle(Point.Empty, size), Color.Gray,
+        TextRenderer.DrawText(g, "缺失", font, new Rectangle(Point.Empty, ThumbSize), Color.Gray,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         return bitmap;
     }
@@ -288,5 +331,11 @@ internal sealed class PanelForm : Form
         _timer.Stop();
         _timer.Dispose();
         _preview.Image?.Dispose();
+        foreach (var thumb in _thumbCache.Values)
+        {
+            if (!ReferenceEquals(thumb, _placeholder)) thumb.Dispose();
+        }
+        _thumbCache.Clear();
+        _placeholder?.Dispose();
     }
 }
