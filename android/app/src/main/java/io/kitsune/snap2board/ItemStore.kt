@@ -8,6 +8,10 @@ import java.util.UUID
 
 class ItemStore(context: Context) {
 
+    private companion object {
+        const val MAX_ITEMS = 200
+    }
+
     data class Entry(
         val seq: Long,
         val id: String,
@@ -54,6 +58,9 @@ class ItemStore(context: Context) {
             origin = origin
         )
         items.add(entry)
+        if (items.size > MAX_ITEMS) {
+            items.subList(0, items.size - MAX_ITEMS).clear()
+        }
         save()
         return entry
     }

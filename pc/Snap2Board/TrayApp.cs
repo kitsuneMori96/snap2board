@@ -15,6 +15,7 @@ internal sealed class TrayApp : ApplicationContext
     private readonly NotifyIcon _tray;
     private readonly ToolStripMenuItem _statusItem;
     private readonly ToolStripMenuItem _pushItem;
+    private readonly ToolStripMenuItem _historyItem;
     private readonly ClipboardWatcher _watcher;
     private readonly SynchronizationContext _ui;
     private readonly CancellationTokenSource _cts = new();
@@ -36,6 +37,7 @@ internal sealed class TrayApp : ApplicationContext
 
         _statusItem = new ToolStripMenuItem("未连接") { Enabled = false };
         _pushItem = new ToolStripMenuItem("上传剪贴板图片", null, (_, _) => TogglePush()) { Checked = true };
+        _historyItem = new ToolStripMenuItem("历史（最近 10 张）");
         var menu = new ContextMenuStrip();
         menu.Items.Add(_statusItem);
         menu.Items.Add(new ToolStripSeparator());
@@ -43,10 +45,12 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripMenuItem("立即同步", null, (_, _) => ManualSync()));
         menu.Items.Add(_pushItem);
         menu.Items.Add(new ToolStripMenuItem("上传当前剪贴板", null, (_, _) => ManualUpload()));
+        menu.Items.Add(_historyItem);
         menu.Items.Add(new ToolStripMenuItem("打开媒体文件夹", null, (_, _) => OpenFolder(AppLog.MediaRoot)));
         menu.Items.Add(new ToolStripMenuItem("打开日志", null, (_, _) => OpenFile(AppLog.LogPath)));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("退出", null, (_, _) => ExitApp()));
+        menu.Opening += (_, _) => RebuildHistoryMenu();
 
         _tray = new NotifyIcon
         {
@@ -61,6 +65,58 @@ internal sealed class TrayApp : ApplicationContext
         _watcher = new ClipboardWatcher();
         _watcher.ImageCaptured += OnClipboardImage;
         _ = Task.Run(() => PollLoopAsync(_cts.Token));
+    }
+
+    private void RebuildHistoryMenu()
+    {
+        _historyItem.DropDownItems.Clear();
+        var all = ClipboardHistory.All();
+        if (all.Count == 0)
+        {
+            _historyItem.DropDownItems.Add(new ToolStripMenuItem("（还没有记录）") { Enabled = false });
+            return;
+        }
+        for (var i = 0; i < all.Count; i++)
+        {
+            var index = i;
+            var entry = all[i];
+            var stamp = entry.CapturedAt > 0
+                ? DateTimeOffset.FromUnixTimeMilliseconds(entry.CapturedAt).LocalDateTime
+                : File.GetLastWriteTime(entry.Path);
+            var item = new ToolStripMenuItem($"{stamp:MM-dd HH:mm:ss}  #{entry.Seq}  {entry.Name}", null,
+                (_, _) => Restore(index));
+            if (!File.Exists(entry.Path)) item.Enabled = false;
+            _historyItem.DropDownItems.Add(item);
+        }
+        _historyItem.DropDownItems.Add(new ToolStripSeparator());
+        _historyItem.DropDownItems.Add(new ToolStripMenuItem("恢复上一张", null, (_, _) => Restore(1)));
+    }
+
+    private void Restore(int index)
+    {
+        var entry = ClipboardHistory.Get(index);
+        if (entry == null)
+        {
+            AppLog.Info("历史里没有这一张");
+            return;
+        }
+        if (!File.Exists(entry.Path))
+        {
+            AppLog.Info($"历史文件已不存在: {entry.Path}");
+            return;
+        }
+        try
+        {
+            var bytes = File.ReadAllBytes(entry.Path);
+            ClipboardWriter.Write(entry.Path, bytes, entry.Mime);
+            ClipboardHistory.Record(entry);
+            AppLog.Info($"恢复历史 #{entry.Seq} {entry.Name}");
+            ShowBalloon($"已恢复 #{entry.Seq}");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Info($"恢复失败: {ex.Message}");
+        }
     }
 
     private void OnClipboardImage(ClipboardImage image)
@@ -245,18 +301,24 @@ internal sealed class TrayApp : ApplicationContext
 
         HubItem? newest = null;
         string? newestPath = null;
+        var pulled = 0;
         foreach (var item in items)
         {
-            _config.Cursor = item.Seq;
-            _config.Save();
             if (item.Origin == "windows")
             {
+                _config.Cursor = item.Seq;
+                _config.Save();
                 AppLog.Info($"跳过回传 #{item.Seq} {item.Name}（PC 自己上传的）");
                 continue;
             }
             var path = await EnsureFileAsync(item, ct);
+            ClipboardHistory.Record(new HistoryEntry(
+                item.Seq, item.Name, path, item.Mime, item.Sha256, item.CapturedAt));
             newest = item;
             newestPath = path;
+            pulled++;
+            _config.Cursor = item.Seq;
+            _config.Save();
             AppLog.Info($"拉取 #{item.Seq} {item.Name} ({item.Size} bytes) -> {path}");
         }
 
@@ -264,7 +326,15 @@ internal sealed class TrayApp : ApplicationContext
         {
             var bytes = await File.ReadAllBytesAsync(newestPath, ct);
             ClipboardWriter.Write(newestPath, bytes, newest.Mime);
-            ShowBalloon($"已复制: {newest.Name}");
+            if (pulled > 1)
+            {
+                AppLog.Info($"断线补课 {pulled} 张，剪贴板只写最新 #{newest.Seq}，其余在历史里");
+                ShowBalloon($"补课 {pulled} 张，已复制最新 #{newest.Seq}");
+            }
+            else
+            {
+                ShowBalloon($"已复制: {newest.Name}");
+            }
         }
 
         SetStatus($"已连接 {_host}:{_config.Port}");
