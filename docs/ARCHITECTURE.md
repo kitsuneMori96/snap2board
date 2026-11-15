@@ -1,0 +1,164 @@
+# Snap2Board 架构设计
+
+## 0. 场景与约束
+
+| 项 | 值 |
+|---|---|
+| 手机 | 魅族 18，Flyme / Android 13，**无 root**，Shizuku 可用 |
+| 电脑 | Surface Go，Windows x64 |
+| 网络 | **手机开热点，Surface Go 连该热点**，仅局域网，不走云端 |
+| 目标 | 手机拍照/截图 → 电脑剪贴板可直接 Ctrl+V；电脑截图 → 手机相册 |
+| 交互 | 零操作自动同步（允许两端各有一个常驻进程） |
+
+## 1. 拓扑：手机当 hub
+
+原方案「PC 当 hub」在热点场景下不成立，原因很硬：
+
+1. 热点里**手机是 AP 网关，地址稳定**；Surface Go 的地址由手机 DHCP 分配，重连就会变。
+2. Surface Go 若当服务端，手机必须先找到「一个随时会变的 IP」。Android 在热点接口上做 mDNS 解析不可靠，等于要为发现机制造一套 ARP 扫描/广播协议。
+3. 反过来，**Surface Go 读自己 Wi-Fi 网卡的默认网关，拿到的就是手机**，零配置、零发现协议。
+4. Surface Go 只发起出站连接：Windows 防火墙在「公用网络」下不拦出站、也无需添加任何入站规则——热点网络默认会被 Windows 标记为公用网络，这一条省掉了一整类坑。
+5. 手机开着热点时 Wi-Fi 射频本来就常亮，多一个监听 socket 的功耗可以忽略。
+
+代价：hub 的状态（序列号、索引）落在手机上；Android 需要内嵌一个 HTTP/WS 服务（Ktor CIO，单个依赖）。这个代价远小于反向做发现。
+
+```
+┌──────────────────────── 魅族 18 (Hub, FGS) ────────────────────────┐
+│  Ktor CIO  0.0.0.0:28642  ── HTTP(上传/下载/补课) + WS(推送)         │
+│      │                                                             │
+│  ItemStore(seq 自增)  ◄── MediaWatcher(ContentObserver + 水位)       │
+│      │                       └─ 相机 / 截图 新增                     │
+│      ▼                                                             │
+│  ReceiveSink ── MediaStore.insert(IS_PENDING) ──► 相册 DCIM/Snap2Board│
+│                                                                    │
+│  ShizukuGrants：pm grant READ_MEDIA_IMAGES / deviceidle whitelist    │
+└───────────────────────────────▲────────────────────────────────────┘
+                                │ 手机热点 AP（网关 192.168.43.x）
+                                │ Surface 只做出站连接
+┌───────────────────────────────┴──── Surface Go (Client) ────────────┐
+│  HubClient ── 读默认网关 → 探测 /health → WS 长连 + since 游标        │
+│      │                                                             │
+│      ├─► 下载图片 → 原子落盘 → ClipboardWriter(DIB+PNG+FileDrop)     │
+│      └─► ClipboardWatcher(WM_CLIPBOARDUPDATE) → 回声表 → POST /items │
+│  托盘：状态 / 历史 / 恢复上一份 / 配对 / 媒体文件夹                    │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+## 2. 组件
+
+### 2.1 Android（Hub）
+
+- **HubServer**（Ktor CIO）：绑定 `0.0.0.0:28642`，HTTP + WS。只服务一个对端，并发极低，无需调优。
+- **ItemStore**（Room）：`items(seq INTEGER PK AUTOINCREMENT, id, sha256 UNIQUE, mime, size, captured_at, origin, rel_path, local_uri)`。`seq` 是全局单调游标，PC 用它补课。
+- **MediaWatcher**：`ContentResolver.registerContentObserver(Images.EXTERNAL_CONTENT_URI)`。触发后查询 `_id > watermark AND is_pending = 0 AND owner_package_name != 本包`，按 `_id` 升序处理，**先推进水位再处理**。
+- **ReceiveSink**：`insert` → `IS_PENDING=1` → 写入 → `IS_PENDING=0`；`RELATIVE_PATH=DCIM/Snap2Board`，`DATE_TAKEN` 用 PC 端时间戳。该路径不需要任何存储权限。
+- **FGS**：`dataSync` 类型，常驻通知显示「已连接 / PC 离线」。Android 13 没有 A15 的 6 小时限制。
+- **ShizukuGrants**：仅一次性授权与 Shizuku 重启后的补刀，业务逻辑不依赖 Shizuku。
+  - `pm grant <pkg> android.permission.READ_MEDIA_IMAGES`
+  - `deviceidle whitelist +<pkg>`
+
+### 2.2 Windows（Client）
+
+- **GatewayDiscovery**：枚举所有 IPv4 网卡的默认网关，逐个探测 `GET /health`，应答且 `service == "snap2board"` 者即为 hub。同时持久化「上次可用地址」，网络变化/唤醒时先试旧地址。
+- **HubClient**：WS 长连（30s ping），断线指数退避重连；每次连上先 `GET /items?since=<cursor>` 补齐。
+- **Store**：`%LOCALAPPDATA%\Snap2Board\media\<yyyyMM>\<sha256>.<ext>`，`.tmp` → rename 原子落盘。
+- **ClipboardWriter**：独立 STA 线程 + 串行队列；`OpenClipboard` 失败重试 10×20ms。
+- **ClipboardWatcher**：隐藏窗口 + `AddClipboardFormatListener`，收 `WM_CLIPBOARDUPDATE`。
+- **Tray**：状态灯、最近 10 条、恢复上一份剪贴板、配对对话框、打开媒体文件夹、退出。
+- **Outbox**：PC→手机方向断线时的磁盘队列。
+
+## 3. 协议
+
+```
+GET  /api/v1/health                     → {service:"snap2board", version, deviceName}
+POST /api/v1/pair/claim   {code, clientName} → {token}
+POST /api/v1/items        multipart: meta(json) + file
+     Authorization: Bearer <token>
+     X-Item-Id: <uuid>   X-Content-SHA256: <hex>
+     → 200 {id, seq, duplicate:false} | 200 {duplicate:true} | 409 哈希不符
+GET  /api/v1/items?since=<seq>&limit=50 → {items:[{seq,id,sha256,mime,size,capturedAt,origin}]}
+GET  /api/v1/items/{id}/content         → 原始字节
+WS   /api/v1/stream?role=pc             → {type:"item", seq, id} | {type:"ping"}
+```
+
+约定：
+
+- **幂等键是 `sha256`**，重传无害；`seq` 只用于游标。
+- **WS 只是唤醒提示，不是交付**。PC 收到 `item` 后按 `seq` 拉取；漏掉推送靠 `since` 补齐。
+- 配对：手机界面显示 6 位码，PC 托盘输入；PC 地址自动取网关，无需手填。
+- 手机热点本身是 WPA2 加密 + token 鉴权，v1 走 HTTP 可接受；TLS（自签 + App 内 pinning）列入 v2。
+
+## 4. 同步规则
+
+- **首发不灌历史**：安装后首次启动把水位设为 `MAX(_id)`。`上传最近 24h` 作为可选开关，默认关。
+- **路径白名单**：`DCIM/Camera/`、`Pictures/Screenshots/`、`DCIM/Screenshots/`，可配置。
+- **防抖**：相机写盘会连发多次 UPDATE，回调合并 1.5s，并校验文件大小稳定后再读。
+- **回声抑制三闸**（缺一不可，路径不同：WS 重发、进程重启、MediaStore 重复通知）：
+  1. 手机侧 `owner_package_name == 本包` 直接忽略（挡住 ReceiveSink 自己插入的）；
+  2. 服务端 5 分钟 / 64 条的哈希 LRU 拒收（挡住 PC 刚推过来的）；
+  3. PC 侧 `lastPushedHash` 比较（挡住自己刚写入的剪贴板又被监听）。
+- **唤醒补课**：PC 休眠期间产生的图片，连上后按 `since` 拉取，**只把最新一张写入剪贴板**（连续覆盖没有意义），其余进历史。
+
+## 5. 剪贴板写入（Windows 侧成败关键）
+
+同时设置三种格式：
+
+1. `CF_DIB` / PNG —— 微信、QQ、Word、浏览器；
+2. `CF_HDROP` 指向落盘文件 —— 资源管理器、只认文件的程序；
+3. 保留原文件路径，供托盘「在文件夹中显示」。
+
+HEIC 风险：魅族相机若输出 HEIC，Windows 解码需要 HEIF 扩展。解码失败时降级为「只设 FileDrop + 托盘提示安装扩展」，不能让整条链断掉。PC→手机方向始终重新编码为 PNG，避免手机侧碰到奇怪格式。
+
+## 6. 魅族 / Flyme 专项
+
+- **权限**：`READ_MEDIA_IMAGES` 走 Shizuku `pm grant`（这是全量授权，不是 A14 的「部分照片」）。若被 ROM 打回，回退 `appops set <pkg> MANAGE_EXTERNAL_STORAGE allow` + FileObserver。
+- **保活**：Flyme 后台管理严格。需要「允许自启动」「允许后台运行」「耗电管理=允许后台高耗电」，并把 App 和 Shizuku 都加入后台锁定（最近任务下拉锁定）。
+- **Shizuku 本身**：Android 13 走无线调试启动；Flyme 可能杀 Shizuku 进程，同样加白名单。App 监听 Shizuku 状态变化并自动重跑 Grants。
+- **截图目录**：Flyme 一般在 `Pictures/Screenshots`，白名单同时包含 `DCIM/Screenshots` 以防版本差异。
+- **重启**：无 root，Shizuku 重启后需手动重开（无线调试），热点也需要手动开——这两件事本来就要做，App 随之恢复即可。
+
+## 7. 失效模式
+
+| 现象 | 对策 |
+|---|---|
+| Surface 重连热点后 IP 变化 | 无关：PC 只连网关 |
+| 手机热点未开 / PC 连了别的 Wi-Fi | 探测所有网卡网关，全部失败则进「未连接」状态并退避重试 |
+| 手机 FGS 被杀 | 通知消失；Flyme 白名单 + 自启动；PC 侧检测到断连后持续重试 |
+| PC 休眠 | 唤醒后重连 + `since` 补课，只补最新一张 |
+| 剪贴板被其他程序占用 | Writer 队列 + OpenClipboard 重试，失败在托盘标红并保留历史 |
+| HEIC 无法解码 | 降级 FileDrop + 提示 |
+| 连拍产生重复回调 | 水位 + 防抖 + sha256 去重 |
+| 手机流量/存储 | 默认仅图片；`Image.delete` 不处理（相册是用户的），App 只存索引 |
+
+## 8. 默认参数
+
+| 参数 | 默认值 |
+|---|---|
+| 端口 | 28642 |
+| 单文件上限 | 50 MB |
+| 视频 | 关闭 |
+| 同步范围 | 相机新增 + 截图 |
+| 首发补最近 24h | 关闭 |
+| 哈希 | SHA-256 |
+| 托盘历史 | 10 条，可恢复上一份剪贴板 |
+| 重试 | 指数退避，上限 60s |
+| 传输 | 仅 Wi-Fi（热点本身就是） |
+
+## 9. 里程碑
+
+- **M0 最小闭环**：手机 FGS + Ktor `/health` `/items`；PC 网关发现 + 手动「发送最新截图」按钮 + 剪贴板写入。验证配对、路由、格式。
+- **M1 自动化上行**：MediaWatcher + 水位 + 防抖 + 去重；PC 侧 `since` 拉取 + 自动写剪贴板。
+- **M2 反向**：PC 剪贴板监听 + WS 推送 + 手机 MediaStore 插入 + 三闸回声抑制。
+- **M3 打磨**：托盘历史/恢复、断线队列、单实例、开机自启、TLS pinning、面板页。
+
+## 10. 目录结构
+
+```
+snap2board/
+├── android/            # Kotlin，单模块
+│   └── app/src/main/java/.../  hub/ watch/ sink/ net/ db/ shizuku/ ui/
+├── pc/Snap2Board/      # .NET 8 WinForms 托盘 + Kestrel 无关的内嵌 HTTP 客户端
+│   ├── Program.cs  Discovery/  HubClient/  Clipboard/  Store/  Tray/
+├── protocol/           # 双端共享的 JSON schema 与契约测试样例
+└── docs/
+```
