@@ -10,6 +10,11 @@
     <RootNamespace>Snap2Board</RootNamespace>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>assets\app.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="assets\app.ico" LogicalName="app.ico" />
+  </ItemGroup>
 
 </Project>

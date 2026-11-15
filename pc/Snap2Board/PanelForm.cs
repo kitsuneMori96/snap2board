@@ -30,7 +30,7 @@ internal sealed class PanelForm : Form
         Height = 600;
         MinimumSize = new Size(460, 360);
         StartPosition = FormStartPosition.CenterScreen;
-        Icon = SystemIcons.Application;
+        Icon = AppIcon.Get();
 
         _statusLabel.AutoSize = true;
         _statusLabel.Font = new Font(Font.FontFamily, 12f, FontStyle.Bold);

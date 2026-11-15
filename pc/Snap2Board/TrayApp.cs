@@ -76,7 +76,7 @@ internal sealed class TrayApp : ApplicationContext
 
         _tray = new NotifyIcon
         {
-            Icon = SystemIcons.Application,
+            Icon = AppIcon.Get(),
             Text = "Snap2Board",
             Visible = true,
             ContextMenuStrip = menu
