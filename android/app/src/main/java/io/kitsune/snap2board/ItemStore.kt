@@ -27,6 +27,7 @@ class ItemStore(context: Context) {
             put("size", size)
             put("capturedAt", capturedAt)
             put("name", name)
+            put("uri", uri)
             put("origin", origin)
         }
     }
@@ -64,6 +65,9 @@ class ItemStore(context: Context) {
     fun byId(id: String): Entry? = items.firstOrNull { it.id == id }
 
     @Synchronized
+    fun hasSha(sha256: String): Boolean = items.any { it.sha256 == sha256 }
+
+    @Synchronized
     fun latestSeq(): Long = items.lastOrNull()?.seq ?: 0L
 
     private fun load() {
@@ -73,20 +77,24 @@ class ItemStore(context: Context) {
             nextSeq = obj.optLong("nextSeq", 1L)
             val array = obj.optJSONArray("items") ?: JSONArray()
             for (i in 0 until array.length()) {
-                val o = array.getJSONObject(i)
-                items.add(
-                    Entry(
-                        seq = o.getLong("seq"),
-                        id = o.getString("id"),
-                        sha256 = o.getString("sha256"),
-                        mime = o.optString("mime", "image/jpeg"),
-                        size = o.optLong("size"),
-                        capturedAt = o.optLong("capturedAt"),
-                        name = o.optString("name", "image"),
-                        uri = o.getString("uri"),
-                        origin = o.optString("origin", "android")
+                try {
+                    val o = array.getJSONObject(i)
+                    items.add(
+                        Entry(
+                            seq = o.getLong("seq"),
+                            id = o.getString("id"),
+                            sha256 = o.getString("sha256"),
+                            mime = o.optString("mime", "image/jpeg"),
+                            size = o.optLong("size"),
+                            capturedAt = o.optLong("capturedAt"),
+                            name = o.optString("name", "image"),
+                            uri = o.optString("uri"),
+                            origin = o.optString("origin", "android")
+                        )
                     )
-                )
+                } catch (t: Throwable) {
+                    HubLog.log("跳过损坏条目 #$i: ${t.message}")
+                }
             }
         } catch (t: Throwable) {
             HubLog.log("索引读取失败: ${t.message}")

@@ -27,6 +27,13 @@ class Prefs(context: Context) {
             sp.edit().putInt("port", value).apply()
         }
 
+    /** -1 表示尚未初始化；初始化时顶到当前相册最大 _id。 */
+    var mediaWatermark: Long
+        get() = sp.getLong("media_watermark", -1L)
+        set(value) {
+            sp.edit().putLong("media_watermark", value).apply()
+        }
+
     fun regeneratePairCode(): String {
         val code = (100000 + SecureRandom().nextInt(900000)).toString()
         sp.edit().putString("pair_code", code).apply()

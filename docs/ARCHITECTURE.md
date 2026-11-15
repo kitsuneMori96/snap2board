@@ -118,6 +118,8 @@ HEIC 风险：魅族相机若输出 HEIC，Windows 解码需要 HEIF 扩展。�
 - **调试触发**：Flyme 的 `am` 在 `-a` 与 `-n` 同时出现时报 “Activity class does not exist”，隐式广播也会被后台限制。自动化统一走 `am broadcast -n io.kitsune.snap2board/.DebugReceiver -a io.kitsune.snap2board.SEND_LATEST_SCREENSHOT`；`DebugReceiver` 仅在 debuggable 构建里生效。
 - **热点网段**：Flyme 热点不是 AOSP 默认的 192.168.43.x，本机实测为 192.168.147.x（手机=.177）。PC 端不要硬编码网段，一律读网关。
 - **重启**：无 root，Shizuku 重启后需手动重开（无线调试），热点也需要手动开——这两件事本来就要做，App 随之恢复即可。
+- **无线调试**：`settings put global adb_wifi_enabled 1` 在本机不生效（写完仍是 0，无 mDNS 广告、无 tls port），只能在「开发者选项 → 无线调试」手动打开；Shizuku 13 的「通过无线调试启动」同样需要界面上显示的配对码。
+- **构建网络**：dl.google.com 在本网络不可直连，`settings.gradle.kts` 里 `mavenCentral()` 必须排在 `google()` 前面；Shizuku 依赖的 `androidx.annotation:1.3.0` 需手动经代理拉进 `~/.m2`（`mavenLocal()` 已加在最前）。
 
 ## 7. 失效模式
 
@@ -149,7 +151,7 @@ HEIC 风险：魅族相机若输出 HEIC，Windows 解码需要 HEIF 扩展。�
 ## 9. 里程碑
 
 - **M0 最小闭环**（已完成）：手机 FGS + 极简 HTTP `/health` `/pair/claim` `/items`；PC 网关发现 + 手动「发送最新截图」+ 剪贴板写入。已在 adb forward 与真实热点（网关 192.168.147.177）两条路径上验证。
-- **M1 自动化上行**：MediaWatcher + 水位 + 防抖 + 去重；PC 侧 `since` 拉取 + 自动写剪贴板。
+- **M1 自动化上行**（已完成）：MediaWatcher + 水位 + 防抖 + 去重；PC 侧 `since` 拉取 + 自动写剪贴板。实测截图后约 2 s 手机入队、PC 侧 1.5 s 内拉取并写剪贴板（无任何手动触发）。
 - **M2 反向**：PC 剪贴板监听 + WS 推送 + 手机 MediaStore 插入 + 三闸回声抑制。
 - **M3 打磨**：托盘历史/恢复、断线队列、单实例、开机自启、TLS pinning、面板页。
 

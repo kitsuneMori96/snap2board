@@ -20,6 +20,7 @@ class MainActivity : Activity() {
 
     private lateinit var statusView: TextView
     private lateinit var codeView: TextView
+    private lateinit var shizukuView: TextView
     private lateinit var logView: TextView
     private val handler = Handler(Looper.getMainLooper())
     private val logListener: (String) -> Unit = { line ->
@@ -56,6 +57,10 @@ class MainActivity : Activity() {
             setTextColor(Color.GRAY)
             setTextIsSelectable(true)
         }
+        shizukuView = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.DKGRAY)
+        }
         val scroll = ScrollView(this).apply { addView(logView) }
 
         fun button(label: String, action: () -> Unit) = Button(this).apply {
@@ -68,6 +73,13 @@ class MainActivity : Activity() {
         root.addView(button("启动服务") { startHub() })
         root.addView(button("停止服务") { stopHub() })
         root.addView(button("申请权限") { requestMediaPermissions() })
+        root.addView(shizukuView)
+        root.addView(button("Shizuku 授权") {
+            ShizukuGrants.ensurePermission(this) { msg ->
+                HubLog.log(msg)
+                refresh()
+            }
+        })
         root.addView(button("发送最新截图") { dispatch(HubService.ACTION_SEND_SCREENSHOT) })
         root.addView(button("发送最新照片") { dispatch(HubService.ACTION_SEND_PHOTO) })
         root.addView(button("重新生成配对码") {
@@ -150,6 +162,23 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == ShizukuGrants.REQUEST_CODE) {
+            ShizukuGrants.applyGrants(this) { msg ->
+                HubLog.log(msg)
+                refresh()
+            }
+        } else {
+            if (HubService.running) startHub()
+            refresh()
+        }
+    }
+
     private fun refresh() {
         val port = Prefs(this).port
         val running = HubService.running
@@ -158,6 +187,7 @@ class MainActivity : Activity() {
             append(" · 端口 $port")
             HubService.lastError?.let { append(" · 错误: $it") }
         }
+        shizukuView.text = ShizukuGrants.status()
         codeView.text = Prefs(this).pairCode
     }
 

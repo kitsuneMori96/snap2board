@@ -35,6 +35,7 @@ class HubService : Service() {
     private lateinit var prefs: Prefs
     private lateinit var store: ItemStore
     private var server: MiniHttpServer? = null
+    private var watcher: MediaWatcher? = null
     private val executor = Executors.newSingleThreadExecutor()
 
     override fun onCreate() {
@@ -52,12 +53,14 @@ class HubService : Service() {
             HubLog.log("debug 配对码: ${prefs.pairCode}")
         }
         startServer()
+        startWatcher()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_SEND_SCREENSHOT -> sendLatest(true)
             ACTION_SEND_PHOTO -> sendLatest(false)
+            else -> startWatcher()
         }
         return START_STICKY
     }
@@ -65,12 +68,36 @@ class HubService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        watcher?.stop()
+        watcher = null
         server?.stop()
         server = null
         running = false
         executor.shutdown()
         HubLog.log("服务停止")
         super.onDestroy()
+    }
+
+    private fun startWatcher() {
+        if (watcher == null) {
+            watcher = MediaWatcher(this, prefs) { pick -> autoCapture(pick) }
+        }
+        watcher?.start()
+    }
+
+    private fun autoCapture(pick: MediaPick) {
+        val sha = MediaPicks.sha256(contentResolver, pick.uri)
+        if (sha == null) {
+            HubLog.log("自动读取失败: ${pick.name}")
+            return
+        }
+        if (store.hasSha(sha)) {
+            HubLog.log("跳过重复: ${pick.name}")
+            return
+        }
+        val entry = store.add(pick, sha)
+        HubLog.log("自动入队 #${entry.seq} ${pick.name} (${pick.size} bytes)")
+        notify("已自动发送 #${entry.seq}")
     }
 
     private fun startServer() {

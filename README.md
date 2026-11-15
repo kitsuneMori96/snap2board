@@ -12,6 +12,8 @@
 
 M0 已跑通：手机前台服务内嵌 HTTP hub（配对 / 列表 / 下载），电脑托盘自动发现网关、轮询拉取并写入剪贴板（DIB + PNG + FileDrop 三种格式）。已在真实热点下验证。
 
+M1 已跑通：MediaStore 自动监听（水位 + 1.5 s 防抖 + sha256 去重），手机截图/拍照后无需任何操作，约 2–4 s 内自动出现在电脑剪贴板。Shizuku 授权入口已接好，用于补全量媒体权限与保活白名单。
+
 ## 构建
 
 ```bash
@@ -26,7 +28,8 @@ pc/Snap2Board/bin/Debug/net10.0-windows/Snap2Board.exe --pair <手机上的6位�
 
 ## 计划
 
-- M1 自动化上行：MediaStore 监听 + 水位去重 + Shizuku 授权
+- M0 最小闭环：MediaStore 监听前的「手动发送 + 剪贴板」链路（已完成）
+- M1 自动化上行：MediaStore 监听 + 水位去重 + Shizuku 授权（已完成）
 - M2 反向：电脑剪贴板监听 + WS 推送 + 手机相册插入
 - M3 打磨：托盘历史、断线补课、TLS pinning
 
