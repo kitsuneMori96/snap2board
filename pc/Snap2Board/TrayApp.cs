@@ -401,7 +401,20 @@ internal sealed class TrayApp : ApplicationContext
                 AppLog.Info($"跳过同批重复 #{item.Seq} {item.Name}");
                 continue;
             }
-            var path = await EnsureFileAsync(item, ct);
+            string path;
+            try
+            {
+                path = await EnsureFileAsync(item, ct);
+            }
+            catch (HttpRequestException ex)
+                when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                // 源文件在手机上已不可读：跳过并推进游标，否则整批永远卡在这一条
+                _config.Cursor = item.Seq;
+                _config.Save();
+                AppLog.Info($"跳过失效条目 #{item.Seq} {item.Name}（手机上已无法读取源图）");
+                continue;
+            }
             ClipboardHistory.Record(new HistoryEntry(
                 item.Seq, item.Name, path, item.Mime, item.Sha256, item.CapturedAt));
             newest = item;
