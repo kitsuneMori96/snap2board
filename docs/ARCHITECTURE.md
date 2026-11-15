@@ -59,7 +59,7 @@
 
 ### 2.2 Windows（Client）
 
-- **GatewayDiscovery**：枚举所有 IPv4 网卡的默认网关，逐个探测 `GET /health`，应答且 `service == "snap2board"` 者即为 hub。同时持久化「上次可用地址」，网络变化/唤醒时先试旧地址。
+- **GatewayDiscovery**：枚举所有 IPv4 网卡的默认网关，逐个探测 `GET /health`，应答且 `service == "snap2board"` 者即为 hub。同时持久化「上次可用地址」，网络变化/唤醒时先试旧地址。托盘另提供「手动指定 host:port」，兜底 USB 网络共享等非热点场景。
 - **HubClient**：WS 长连（30s ping），断线指数退避重连；每次连上先 `GET /items?since=<cursor>` 补齐。
 - **Store**：`%LOCALAPPDATA%\Snap2Board\media\<yyyyMM>\<sha256>.<ext>`，`.tmp` → rename 原子落盘。
 - **ClipboardWriter**：独立 STA 线程 + 串行队列；`OpenClipboard` 失败重试 10×20ms。
@@ -122,7 +122,7 @@ HEIC 风险：魅族相机若输出 HEIC，Windows 解码需要 HEIF 扩展。�
 | 现象 | 对策 |
 |---|---|
 | Surface 重连热点后 IP 变化 | 无关：PC 只连网关 |
-| 手机热点未开 / PC 连了别的 Wi-Fi | 探测所有网卡网关，全部失败则进「未连接」状态并退避重试 |
+| 手机热点未开 / PC 连了别的 Wi-Fi | 探测所有网卡网关，全部失败则进「未连接」状态并退避重试；仍失败可手动指定 host:port |
 | 手机 FGS 被杀 | 通知消失；Flyme 白名单 + 自启动；PC 侧检测到断连后持续重试 |
 | PC 休眠 | 唤醒后重连 + `since` 补课，只补最新一张 |
 | 剪贴板被其他程序占用 | Writer 队列 + OpenClipboard 重试，失败在托盘标红并保留历史 |
