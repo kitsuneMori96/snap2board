@@ -70,21 +70,21 @@
 ## 3. 协议
 
 ```
-GET  /api/v1/health                     → {service:"snap2board", version, deviceName}
+GET  /api/v1/health                     → {service:"snap2board", version, device, hosts}
 POST /api/v1/pair/claim   {code, clientName} → {token}
-POST /api/v1/items        multipart: meta(json) + file
-     Authorization: Bearer <token>
-     X-Item-Id: <uuid>   X-Content-SHA256: <hex>
-     → 200 {id, seq, duplicate:false} | 200 {duplicate:true} | 409 哈希不符
-GET  /api/v1/items?since=<seq>&limit=50 → {items:[{seq,id,sha256,mime,size,capturedAt,origin}]}
+POST /api/v1/upload       body 即原始图片字节；Authorization: Bearer <token>
+     Content-Type: image/png
+     X-Sha256: <hex>   X-Captured-At: <ms>   X-Name: <文件名>
+     → 200 {seq, id, deduped:false} | 200 {deduped:true} | 400 | 413 | 500
+GET  /api/v1/items?since=<seq>          → {items:[{seq,id,sha256,mime,size,capturedAt,name,uri,origin}], latestSeq}
 GET  /api/v1/items/{id}/content         → 原始字节
-WS   /api/v1/stream?role=pc             → {type:"item", seq, id} | {type:"ping"}
 ```
 
 约定：
 
 - **幂等键是 `sha256`**，重传无害；`seq` 只用于游标。
-- **WS 只是唤醒提示，不是交付**。PC 收到 `item` 后按 `seq` 拉取；漏掉推送靠 `since` 补齐。
+- 上行（手机→PC）走 `items?since=` 轮询；下行（PC→手机）走 `POST /upload` 直推，语义等价于「把这张图放进相册」。没做 WS：v1 的轮询延迟已经 2s 内，WS 只是锦上添花。
+- `origin` 区分来源：`android`（手机产生）与 `windows`（PC 推过去的）。PC 拉到 `windows` 条目只推进游标，不写剪贴板。
 - 配对：手机界面显示 6 位码，PC 托盘输入；PC 地址自动取网关，无需手填。
 - 手机热点本身是 WPA2 加密 + token 鉴权，v1 走 HTTP 可接受；TLS（自签 + App 内 pinning）列入 v2。
 
@@ -93,10 +93,10 @@ WS   /api/v1/stream?role=pc             → {type:"item", seq, id} | {type:"ping
 - **首发不灌历史**：安装后首次启动把水位设为 `MAX(_id)`。`上传最近 24h` 作为可选开关，默认关。
 - **路径白名单**：`DCIM/Camera/`、`Pictures/Screenshots/`、`DCIM/Screenshots/`，可配置。
 - **防抖**：相机写盘会连发多次 UPDATE，回调合并 1.5s，并校验文件大小稳定后再读。
-- **回声抑制三闸**（缺一不可，路径不同：WS 重发、进程重启、MediaStore 重复通知）：
-  1. 手机侧 `owner_package_name == 本包` 直接忽略（挡住 ReceiveSink 自己插入的）；
-  2. 服务端 5 分钟 / 64 条的哈希 LRU 拒收（挡住 PC 刚推过来的）；
-  3. PC 侧 `lastPushedHash` 比较（挡住自己刚写入的剪贴板又被监听）。
+- **回声抑制三闸**（实测生效）：
+  1. 手机侧查询带 `owner_package_name != 本包`，PC 推来的图由本包写入，永远不进上报队列；
+  2. 手机侧路径白名单只认 `DCIM/Camera/` 与 `*/Screenshots/`，落进 `Pictures/Snap2Board/` 的图不在范围内；
+  3. PC 侧按**像素哈希**（非 PNG 编码哈希）识别「这张图是 10 秒内我刚从手机写进剪贴板的」，直接跳过，避免把收到的图再推回去。
 - **唤醒补课**：PC 休眠期间产生的图片，连上后按 `since` 拉取，**只把最新一张写入剪贴板**（连续覆盖没有意义），其余进历史。
 
 ## 5. 剪贴板写入（Windows 侧成败关键）
@@ -132,6 +132,8 @@ HEIC 风险：魅族相机若输出 HEIC，Windows 解码需要 HEIF 扩展。�
 | 剪贴板被其他程序占用 | Writer 队列 + OpenClipboard 重试，失败在托盘标红并保留历史 |
 | HEIC 无法解码 | 降级 FileDrop + 提示 |
 | 连拍产生重复回调 | 水位 + 防抖 + sha256 去重 |
+| 手机 hub 假死（listen 有积压但连接永远不处理） | 实测遇到过一次：改用 `SO_REUSEADDR` + 线程池 + accept 失败重试，并加 20 s 本地自检，连续 2 次失败就重建监听 |
+| PC 轮询线程静默退出 | `HttpClient` 超时抛的 `TaskCanceledException` 也是 `OperationCanceledException`，曾被当成「应用退出」而 break；现在只在 `ct.IsCancellationRequested` 时退出，其余记录超时继续重试，循环意外结束还会自拉起 |
 | 手机流量/存储 | 默认仅图片；`Image.delete` 不处理（相册是用户的），App 只存索引 |
 
 ## 8. 默认参数
@@ -152,7 +154,7 @@ HEIC 风险：魅族相机若输出 HEIC，Windows 解码需要 HEIF 扩展。�
 
 - **M0 最小闭环**（已完成）：手机 FGS + 极简 HTTP `/health` `/pair/claim` `/items`；PC 网关发现 + 手动「发送最新截图」+ 剪贴板写入。已在 adb forward 与真实热点（网关 192.168.147.177）两条路径上验证。
 - **M1 自动化上行**（已完成）：MediaWatcher + 水位 + 防抖 + 去重；PC 侧 `since` 拉取 + 自动写剪贴板。实测截图后约 2 s 手机入队、PC 侧 1.5 s 内拉取并写剪贴板（无任何手动触发）。
-- **M2 反向**：PC 剪贴板监听 + WS 推送 + 手机 MediaStore 插入 + 三闸回声抑制。
+- **M2 反向**（已完成）：PC 剪贴板监听（`WM_CLIPBOARDUPDATE` + 250ms 防抖 + 剪贴板序号校验）→ `POST /upload` → 手机写入 `Pictures/Snap2Board`；回显由「像素哈希 + origin + owner 过滤」三重挡住。实测双向都在 2–3 s 内完成，且不会互相回弹。
 - **M3 打磨**：托盘历史/恢复、断线队列、单实例、开机自启、TLS pinning、面板页。
 
 ## 10. 目录结构

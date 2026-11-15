@@ -5,10 +5,12 @@ import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.Executors
 
 class HttpRequest(
     val method: String,
@@ -43,13 +45,19 @@ class HttpResponse(
 class MiniHttpServer(private val port: Int, private val handler: (HttpRequest) -> HttpResponse) {
 
     private var serverSocket: ServerSocket? = null
+    private val workers = Executors.newCachedThreadPool { runnable ->
+        Thread(runnable, "s2b-conn").apply { isDaemon = true }
+    }
 
     @Volatile
     var running = false
         private set
 
     fun start() {
-        val socket = ServerSocket(port)
+        val socket = ServerSocket().apply {
+            reuseAddress = true
+            bind(InetSocketAddress("0.0.0.0", port), 64)
+        }
         serverSocket = socket
         running = true
         Thread({ acceptLoop(socket) }, "s2b-accept").apply { isDaemon = true }.start()
@@ -62,6 +70,7 @@ class MiniHttpServer(private val port: Int, private val handler: (HttpRequest) -
         } catch (_: Exception) {
         }
         serverSocket = null
+        workers.shutdownNow()
     }
 
     private fun acceptLoop(socket: ServerSocket) {
@@ -69,10 +78,22 @@ class MiniHttpServer(private val port: Int, private val handler: (HttpRequest) -
             val client = try {
                 socket.accept()
             } catch (e: Exception) {
-                if (running) Log.w("Snap2Board", "accept failed: ${e.message}")
-                break
+                if (!running) break
+                Log.w("Snap2Board", "accept failed: ${e.message}")
+                try {
+                    Thread.sleep(200)
+                } catch (_: InterruptedException) {
+                    break
+                }
+                continue
             }
-            Thread({ serve(client) }, "s2b-conn").apply { isDaemon = true }.start()
+            try {
+                client.tcpNoDelay = true
+                workers.execute { serve(client) }
+            } catch (t: Throwable) {
+                Log.w("Snap2Board", "派发连接失败: ${t.message}")
+                runCatching { client.close() }
+            }
         }
     }
 
@@ -149,6 +170,7 @@ class MiniHttpServer(private val port: Int, private val handler: (HttpRequest) -
         403 -> "Forbidden"
         404 -> "Not Found"
         409 -> "Conflict"
+        413 -> "Payload Too Large"
         500 -> "Internal Server Error"
         else -> "OK"
     }

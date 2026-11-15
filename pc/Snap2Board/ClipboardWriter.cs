@@ -11,6 +11,14 @@ internal static class ClipboardWriter
 
     private static readonly BlockingCollection<Job> Queue = new();
     private static readonly List<object> KeepAlive = new();
+    private static (string? Hash, DateTime At) _lastWrite;
+
+    /// <summary>剪贴板里的这张图是不是我们刚从手机写进去的（10 秒内按像素哈希比对）。</summary>
+    public static bool IsRecentWrite(string pixelHash)
+    {
+        var (hash, at) = _lastWrite;
+        return hash != null && hash == pixelHash && DateTime.UtcNow - at < TimeSpan.FromSeconds(10);
+    }
 
     static ClipboardWriter()
     {
@@ -82,6 +90,10 @@ internal static class ClipboardWriter
                     while (KeepAlive.Count > 32) KeepAlive.RemoveAt(0);
                 }
                 AppLog.Info($"剪贴板已更新: {Path.GetFileName(job.Path)} 格式={string.Join(",", data.GetFormats())}");
+                if (image != null)
+                {
+                    _lastWrite = (ImageHash.Of(image), DateTime.UtcNow);
+                }
                 return;
             }
             catch (ExternalException ex)

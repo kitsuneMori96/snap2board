@@ -14,11 +14,15 @@ internal sealed class TrayApp : ApplicationContext
     private readonly HubClient _hub = new();
     private readonly NotifyIcon _tray;
     private readonly ToolStripMenuItem _statusItem;
+    private readonly ToolStripMenuItem _pushItem;
+    private readonly ClipboardWatcher _watcher;
     private readonly SynchronizationContext _ui;
     private readonly CancellationTokenSource _cts = new();
     private readonly string? _autoPairCode;
     private string _host = "";
     private bool _connected;
+    private bool _pushEnabled = true;
+    private string _lastPushedSha = "";
 
     public TrayApp(CliOptions options)
     {
@@ -31,11 +35,14 @@ internal sealed class TrayApp : ApplicationContext
         _autoPairCode = options.PairCode;
 
         _statusItem = new ToolStripMenuItem("未连接") { Enabled = false };
+        _pushItem = new ToolStripMenuItem("上传剪贴板图片", null, (_, _) => TogglePush()) { Checked = true };
         var menu = new ContextMenuStrip();
         menu.Items.Add(_statusItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("配对…", null, (_, _) => PromptPair()));
         menu.Items.Add(new ToolStripMenuItem("立即同步", null, (_, _) => ManualSync()));
+        menu.Items.Add(_pushItem);
+        menu.Items.Add(new ToolStripMenuItem("上传当前剪贴板", null, (_, _) => ManualUpload()));
         menu.Items.Add(new ToolStripMenuItem("打开媒体文件夹", null, (_, _) => OpenFolder(AppLog.MediaRoot)));
         menu.Items.Add(new ToolStripMenuItem("打开日志", null, (_, _) => OpenFile(AppLog.LogPath)));
         menu.Items.Add(new ToolStripSeparator());
@@ -51,7 +58,82 @@ internal sealed class TrayApp : ApplicationContext
         _tray.DoubleClick += (_, _) => OpenFolder(AppLog.MediaRoot);
 
         AppLog.Info("托盘程序启动");
+        _watcher = new ClipboardWatcher();
+        _watcher.ImageCaptured += OnClipboardImage;
         _ = Task.Run(() => PollLoopAsync(_cts.Token));
+    }
+
+    private void OnClipboardImage(ClipboardImage image)
+    {
+        if (!_pushEnabled) return;
+        if (ClipboardWriter.IsRecentWrite(image.PixelHash))
+        {
+            AppLog.Info("跳过回显：这张图刚从手机来");
+            return;
+        }
+        if (image.Sha256 == _lastPushedSha) return;
+        if (image.Png.Length > 50 * 1024 * 1024)
+        {
+            AppLog.Info($"剪贴板图片过大，跳过: {image.Png.Length} bytes");
+            return;
+        }
+        _lastPushedSha = image.Sha256;
+        _ = Task.Run(() => PushAsync(image));
+    }
+
+    private void TogglePush()
+    {
+        _pushEnabled = !_pushEnabled;
+        _pushItem.Checked = _pushEnabled;
+        AppLog.Info(_pushEnabled ? "剪贴板上传已开启" : "剪贴板上传已关闭");
+    }
+
+    private void ManualUpload()
+    {
+        if (!Clipboard.ContainsImage())
+        {
+            AppLog.Info("剪贴板里没有图片");
+            return;
+        }
+        try
+        {
+            using var img = Clipboard.GetImage();
+            if (img == null) return;
+            using var stream = new MemoryStream();
+            img.Save(stream, System.Drawing.Imaging.ImageFormat.Png);
+            var png = stream.ToArray();
+            var sha = Convert.ToHexString(SHA256.HashData(png)).ToLowerInvariant();
+            _lastPushedSha = sha;
+            _ = Task.Run(() => PushAsync(new ClipboardImage(png, sha, "", img.Width, img.Height)));
+        }
+        catch (Exception ex)
+        {
+            AppLog.Info($"读取剪贴板失败: {ex.Message}");
+        }
+    }
+
+    private async Task PushAsync(ClipboardImage image)
+    {
+        if (!_connected || string.IsNullOrEmpty(_config.Token))
+        {
+            AppLog.Info("未连接手机，剪贴板图片未上传");
+            return;
+        }
+        try
+        {
+            var name = $"clip-{DateTime.Now:yyyyMMdd-HHmmss}.png";
+            var ok = await _hub.PushImageAsync(
+                _host, _config.Port, _config.Token, image.Png, image.Sha256, name,
+                DateTimeOffset.Now.ToUnixTimeMilliseconds(), _cts.Token);
+            AppLog.Info(ok
+                ? $"已上传剪贴板图片 {image.Width}x{image.Height} ({image.Png.Length} bytes)"
+                : "上传剪贴板图片失败");
+            if (ok) ShowBalloon("已存入手机相册");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Info($"上传异常: {ex.Message}");
+        }
     }
 
     private void ApplyHostArgument(string value)
@@ -95,7 +177,10 @@ internal sealed class TrayApp : ApplicationContext
             }
             catch (OperationCanceledException)
             {
-                break;
+                if (ct.IsCancellationRequested) break;
+                // HttpClient 自身超时也走这里；手机 hub 假死时不能顺手把轮询线程也结束掉
+                AppLog.Info("请求超时，稍后重试");
+                _connected = false;
             }
             catch (Exception ex)
             {
@@ -109,8 +194,22 @@ internal sealed class TrayApp : ApplicationContext
             }
             catch
             {
-                break;
+                if (ct.IsCancellationRequested) break;
             }
+        }
+
+        if (!ct.IsCancellationRequested)
+        {
+            AppLog.Info("轮询线程意外退出，5 秒后重启");
+            try
+            {
+                await Task.Delay(5000, ct);
+            }
+            catch
+            {
+                return;
+            }
+            _ = Task.Run(() => PollLoopAsync(ct));
         }
     }
 
@@ -148,9 +247,14 @@ internal sealed class TrayApp : ApplicationContext
         string? newestPath = null;
         foreach (var item in items)
         {
-            var path = await EnsureFileAsync(item, ct);
             _config.Cursor = item.Seq;
             _config.Save();
+            if (item.Origin == "windows")
+            {
+                AppLog.Info($"跳过回传 #{item.Seq} {item.Name}（PC 自己上传的）");
+                continue;
+            }
+            var path = await EnsureFileAsync(item, ct);
             newest = item;
             newestPath = path;
             AppLog.Info($"拉取 #{item.Seq} {item.Name} ({item.Size} bytes) -> {path}");
@@ -363,6 +467,7 @@ internal sealed class TrayApp : ApplicationContext
     private void ExitApp()
     {
         _cts.Cancel();
+        _watcher.Dispose();
         _tray.Visible = false;
         _tray.Dispose();
         ExitThread();

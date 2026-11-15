@@ -105,6 +105,9 @@ object MediaPicks {
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
+    fun sha256(data: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(data).joinToString("") { "%02x".format(it) }
+
     private fun read(cursor: Cursor): MediaPick {
         val id = cursor.getLong(0)
         val name = cursor.getString(1) ?: "image"

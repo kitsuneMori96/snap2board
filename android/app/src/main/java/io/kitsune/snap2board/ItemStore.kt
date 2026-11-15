@@ -41,7 +41,7 @@ class ItemStore(context: Context) {
     }
 
     @Synchronized
-    fun add(pick: MediaPick, sha256: String): Entry {
+    fun add(pick: MediaPick, sha256: String, origin: String = "android"): Entry {
         val entry = Entry(
             seq = nextSeq++,
             id = UUID.randomUUID().toString(),
@@ -51,7 +51,7 @@ class ItemStore(context: Context) {
             capturedAt = pick.capturedAt,
             name = pick.name,
             uri = pick.uri.toString(),
-            origin = "android"
+            origin = origin
         )
         items.add(entry)
         save()

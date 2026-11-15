@@ -13,9 +13,12 @@ import android.os.IBinder
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.Inet4Address
+import java.net.InetSocketAddress
 import java.net.NetworkInterface
+import java.net.Socket
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class HubService : Service() {
 
@@ -30,6 +33,8 @@ class HubService : Service() {
 
         @Volatile
         var lastError: String? = null
+
+        private const val MAX_UPLOAD = 50L * 1024 * 1024
     }
 
     private lateinit var prefs: Prefs
@@ -37,6 +42,10 @@ class HubService : Service() {
     private var server: MiniHttpServer? = null
     private var watcher: MediaWatcher? = null
     private val executor = Executors.newSingleThreadExecutor()
+    private val watchdog = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "s2b-watchdog").apply { isDaemon = true }
+    }
+    private var probeFailures = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -54,6 +63,7 @@ class HubService : Service() {
         }
         startServer()
         startWatcher()
+        startWatchdog()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -74,6 +84,7 @@ class HubService : Service() {
         server = null
         running = false
         executor.shutdown()
+        watchdog.shutdownNow()
         HubLog.log("服务停止")
         super.onDestroy()
     }
@@ -98,6 +109,50 @@ class HubService : Service() {
         val entry = store.add(pick, sha)
         HubLog.log("自动入队 #${entry.seq} ${pick.name} (${pick.size} bytes)")
         notify("已自动发送 #${entry.seq}")
+    }
+
+    private fun startWatchdog() {
+        watchdog.scheduleWithFixedDelay(::probeSelf, 20, 20, TimeUnit.SECONDS)
+    }
+
+    /** 实测遇到过 listen 有积压、连接不处理的假死，用本地自检把它重启。 */
+    private fun probeSelf() {
+        if (!running) return
+        val ok = try {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress("127.0.0.1", prefs.port), 3000)
+                socket.soTimeout = 3000
+                socket.getOutputStream().apply {
+                    write("GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".toByteArray())
+                    flush()
+                }
+                socket.getInputStream().bufferedReader().readLine()?.contains(" 200 ") == true
+            }
+        } catch (t: Throwable) {
+            false
+        }
+        if (ok) {
+            probeFailures = 0
+            return
+        }
+        probeFailures++
+        HubLog.log("自检失败第 $probeFailures 次")
+        if (probeFailures >= 2) {
+            probeFailures = 0
+            restartServer()
+        }
+    }
+
+    private fun restartServer() {
+        HubLog.log("hub 无响应，重启监听")
+        server?.stop()
+        server = null
+        running = false
+        try {
+            startServer()
+        } catch (t: Throwable) {
+            HubLog.log("重启监听失败: ${t.message}")
+        }
     }
 
     private fun startServer() {
@@ -128,6 +183,7 @@ class HubService : Service() {
         }
         return when {
             request.method == "GET" && request.path == "/api/v1/items" -> items(request)
+            request.method == "POST" && request.path == "/api/v1/upload" -> upload(request)
             request.method == "GET" && request.path.startsWith("/api/v1/items/") &&
                 request.path.endsWith("/content") -> content(request)
             request.method == "GET" && request.path == "/" -> HttpResponse.bytes(
@@ -140,7 +196,7 @@ class HubService : Service() {
 
     private fun healthJson(): JSONObject = JSONObject().apply {
         put("service", "snap2board")
-        put("version", "0.1.0")
+        put("version", BuildConfig.VERSION_NAME)
         put("device", Build.MODEL)
         put("port", prefs.port)
         put("hosts", JSONArray(localAddresses()))
@@ -174,6 +230,48 @@ class HubService : Service() {
             put("latestSeq", store.latestSeq())
         }
         return HttpResponse.json(200, body.toString())
+    }
+
+    private fun upload(request: HttpRequest): HttpResponse {
+        val mime = (request.header("content-type") ?: "image/png").substringBefore(';').trim().lowercase()
+        if (!mime.startsWith("image/")) {
+            return HttpResponse.json(400, JSONObject().put("error", "not an image").toString())
+        }
+        val data = request.body
+        if (data.isEmpty()) {
+            return HttpResponse.json(400, JSONObject().put("error", "empty body").toString())
+        }
+        if (data.size > MAX_UPLOAD) {
+            return HttpResponse.json(413, JSONObject().put("error", "too large").toString())
+        }
+        val sha = request.header("x-sha256")?.lowercase()?.takeIf { it.length == 64 }
+            ?: MediaPicks.sha256(data)
+        if (store.hasSha(sha)) {
+            HubLog.log("跳过重复上传 ${sha.take(12)}…")
+            return HttpResponse.json(200, JSONObject().put("deduped", true).toString())
+        }
+        val capturedAt = request.header("x-captured-at")?.toLongOrNull() ?: System.currentTimeMillis()
+        val name = request.header("x-name") ?: "snap2board-${capturedAt}${extensionFor(mime)}"
+        val uri = MediaSink.insertImage(this, name, mime, data)
+        if (uri == null) {
+            return HttpResponse.json(500, JSONObject().put("error", "album write failed").toString())
+        }
+        val pick = MediaPick(0L, uri, name, mime, data.size.toLong(), capturedAt)
+        val entry = store.add(pick, sha, origin = "windows")
+        HubLog.log("收到 PC 图片 #${entry.seq} $name (${data.size} bytes)")
+        notify("已存入相册 #${entry.seq}")
+        return HttpResponse.json(
+            200,
+            JSONObject().put("seq", entry.seq).put("id", entry.id).put("deduped", false).toString()
+        )
+    }
+
+    private fun extensionFor(mime: String): String = when (mime) {
+        "image/png" -> ".png"
+        "image/jpeg" -> ".jpg"
+        "image/webp" -> ".webp"
+        "image/gif" -> ".gif"
+        else -> ".png"
     }
 
     private fun content(request: HttpRequest): HttpResponse {

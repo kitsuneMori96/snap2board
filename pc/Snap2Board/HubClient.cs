@@ -12,7 +12,8 @@ internal sealed record HubItem(
     string Mime,
     string Name,
     long Size,
-    long CapturedAt);
+    long CapturedAt,
+    string Origin);
 
 internal sealed record HubHealth(string Device, int Port);
 
@@ -86,9 +87,27 @@ internal sealed class HubClient
                 item.TryGetProperty("mime", out var mime) ? mime.GetString() ?? "" : "",
                 item.TryGetProperty("name", out var name) ? name.GetString() ?? "" : "",
                 item.TryGetProperty("size", out var size) ? size.GetInt64() : 0,
-                item.TryGetProperty("capturedAt", out var captured) ? captured.GetInt64() : 0));
+                item.TryGetProperty("capturedAt", out var captured) ? captured.GetInt64() : 0,
+                item.TryGetProperty("origin", out var origin) ? origin.GetString() ?? "" : ""));
         }
         return result;
+    }
+
+    public async Task<bool> PushImageAsync(
+        string host, int port, string token, byte[] png, string sha256, string name, long capturedAt,
+        CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post, $"http://{host}:{port}/api/v1/upload");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        request.Headers.TryAddWithoutValidation("X-Sha256", sha256);
+        request.Headers.TryAddWithoutValidation("X-Name", name);
+        request.Headers.TryAddWithoutValidation("X-Captured-At", capturedAt.ToString());
+        var content = new ByteArrayContent(png);
+        content.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+        request.Content = content;
+        using var response = await _http.SendAsync(request, ct);
+        return response.IsSuccessStatusCode;
     }
 
     public async Task<byte[]> DownloadAsync(
