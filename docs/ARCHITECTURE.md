@@ -20,11 +20,11 @@
 4. Surface Go 只发起出站连接：Windows 防火墙在「公用网络」下不拦出站、也无需添加任何入站规则——热点网络默认会被 Windows 标记为公用网络，这一条省掉了一整类坑。
 5. 手机开着热点时 Wi-Fi 射频本来就常亮，多一个监听 socket 的功耗可以忽略。
 
-代价：hub 的状态（序列号、索引）落在手机上；Android 需要内嵌一个 HTTP/WS 服务（Ktor CIO，单个依赖）。这个代价远小于反向做发现。
+代价：hub 的状态（序列号、索引）落在手机上；Android 需要内嵌一个 HTTP 服务。这个代价远小于反向做发现，而且单客户端场景下一个 `ServerSocket` 就够了，不必引入框架。
 
 ```
 ┌──────────────────────── 魅族 18 (Hub, FGS) ────────────────────────┐
-│  Ktor CIO  0.0.0.0:28642  ── HTTP(上传/下载/补课) + WS(推送)         │
+│  MiniHttpServer  0.0.0.0:28642  ── HTTP(下载/补课) + WS(M2 再加)      │
 │      │                                                             │
 │  ItemStore(seq 自增)  ◄── MediaWatcher(ContentObserver + 水位)       │
 │      │                       └─ 相机 / 截图 新增                     │
@@ -48,7 +48,7 @@
 
 ### 2.1 Android（Hub）
 
-- **HubServer**（Ktor CIO）：绑定 `0.0.0.0:28642`，HTTP + WS。只服务一个对端，并发极低，无需调优。
+- **HubServer**（自研极简 HTTP，`MiniHttpServer.kt`）：绑定 `0.0.0.0:28642`，每连接一线程，只服务一个对端。M0 实测足够；M2 需要 WS 时再评估是否引入 Ktor，避免提前背依赖。
 - **ItemStore**（Room）：`items(seq INTEGER PK AUTOINCREMENT, id, sha256 UNIQUE, mime, size, captured_at, origin, rel_path, local_uri)`。`seq` 是全局单调游标，PC 用它补课。
 - **MediaWatcher**：`ContentResolver.registerContentObserver(Images.EXTERNAL_CONTENT_URI)`。触发后查询 `_id > watermark AND is_pending = 0 AND owner_package_name != 本包`，按 `_id` 升序处理，**先推进水位再处理**。
 - **ReceiveSink**：`insert` → `IS_PENDING=1` → 写入 → `IS_PENDING=0`；`RELATIVE_PATH=DCIM/Snap2Board`，`DATE_TAKEN` 用 PC 端时间戳。该路径不需要任何存储权限。
@@ -115,6 +115,8 @@ HEIC 风险：魅族相机若输出 HEIC，Windows 解码需要 HEIF 扩展。�
 - **保活**：Flyme 后台管理严格。需要「允许自启动」「允许后台运行」「耗电管理=允许后台高耗电」，并把 App 和 Shizuku 都加入后台锁定（最近任务下拉锁定）。
 - **Shizuku 本身**：Android 13 走无线调试启动；Flyme 可能杀 Shizuku 进程，同样加白名单。App 监听 Shizuku 状态变化并自动重跑 Grants。
 - **截图目录**：Flyme 一般在 `Pictures/Screenshots`，白名单同时包含 `DCIM/Screenshots` 以防版本差异。
+- **调试触发**：Flyme 的 `am` 在 `-a` 与 `-n` 同时出现时报 “Activity class does not exist”，隐式广播也会被后台限制。自动化统一走 `am broadcast -n io.kitsune.snap2board/.DebugReceiver -a io.kitsune.snap2board.SEND_LATEST_SCREENSHOT`；`DebugReceiver` 仅在 debuggable 构建里生效。
+- **热点网段**：Flyme 热点不是 AOSP 默认的 192.168.43.x，本机实测为 192.168.147.x（手机=.177）。PC 端不要硬编码网段，一律读网关。
 - **重启**：无 root，Shizuku 重启后需手动重开（无线调试），热点也需要手动开——这两件事本来就要做，App 随之恢复即可。
 
 ## 7. 失效模式
@@ -146,7 +148,7 @@ HEIC 风险：魅族相机若输出 HEIC，Windows 解码需要 HEIF 扩展。�
 
 ## 9. 里程碑
 
-- **M0 最小闭环**：手机 FGS + Ktor `/health` `/items`；PC 网关发现 + 手动「发送最新截图」按钮 + 剪贴板写入。验证配对、路由、格式。
+- **M0 最小闭环**（已完成）：手机 FGS + 极简 HTTP `/health` `/pair/claim` `/items`；PC 网关发现 + 手动「发送最新截图」+ 剪贴板写入。已在 adb forward 与真实热点（网关 192.168.147.177）两条路径上验证。
 - **M1 自动化上行**：MediaWatcher + 水位 + 防抖 + 去重；PC 侧 `since` 拉取 + 自动写剪贴板。
 - **M2 反向**：PC 剪贴板监听 + WS 推送 + 手机 MediaStore 插入 + 三闸回声抑制。
 - **M3 打磨**：托盘历史/恢复、断线队列、单实例、开机自启、TLS pinning、面板页。
@@ -157,7 +159,7 @@ HEIC 风险：魅族相机若输出 HEIC，Windows 解码需要 HEIF 扩展。�
 snap2board/
 ├── android/            # Kotlin，单模块
 │   └── app/src/main/java/.../  hub/ watch/ sink/ net/ db/ shizuku/ ui/
-├── pc/Snap2Board/      # .NET 8 WinForms 托盘 + Kestrel 无关的内嵌 HTTP 客户端
+├── pc/Snap2Board/      # .NET 10 WinForms 托盘 + HttpClient
 │   ├── Program.cs  Discovery/  HubClient/  Clipboard/  Store/  Tray/
 ├── protocol/           # 双端共享的 JSON schema 与契约测试样例
 └── docs/
