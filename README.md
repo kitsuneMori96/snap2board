@@ -16,7 +16,7 @@ M1 已跑通：MediaStore 自动监听（水位 + 1.5 s 防抖 + sha256 去重�
 
 M2 已跑通：PC 复制图片后自动推到手机 `Pictures/Snap2Board` 相册；双向都有回显抑制，收到的图不会被再推回去。
 
-M3 进行中：托盘历史（最近 10 张，可一键写回剪贴板）与断线补课（重连后只复制最新一张）已完成。
+M3 进行中：托盘历史（最近 10 张，可一键写回剪贴板）、断线补课（重连后只复制最新一张）、开机自启（PC 托盘开关 + 手机开机广播）已完成。
 
 ## 构建
 
@@ -28,6 +28,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 # Windows
 dotnet build pc/Snap2Board/Snap2Board.csproj -c Debug
 pc/Snap2Board/bin/Debug/net10.0-windows/Snap2Board.exe --pair <手机上的6位码>
+# 开机自启（也可在托盘菜单里勾选）
+Snap2Board.exe --autostart on|off
 ```
 
 ## 计划
@@ -35,7 +37,7 @@ pc/Snap2Board/bin/Debug/net10.0-windows/Snap2Board.exe --pair <手机上的6位�
 - M0 最小闭环：MediaStore 监听前的「手动发送 + 剪贴板」链路（已完成）
 - M1 自动化上行：MediaStore 监听 + 水位去重 + Shizuku 授权（已完成）
 - M2 反向：电脑剪贴板监听 + 推送到手机相册（已完成）
-- M3 打磨：托盘历史、断线补课（已完成）；单实例、开机自启、TLS pinning、面板页
+- M3 打磨：托盘历史、断线补课、开机自启（已完成）；TLS pinning、面板页
 
 ## 目录
 

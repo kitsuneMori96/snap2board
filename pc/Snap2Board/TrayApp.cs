@@ -16,6 +16,7 @@ internal sealed class TrayApp : ApplicationContext
     private readonly ToolStripMenuItem _statusItem;
     private readonly ToolStripMenuItem _pushItem;
     private readonly ToolStripMenuItem _historyItem;
+    private readonly ToolStripMenuItem _autoStartItem;
     private readonly ClipboardWatcher _watcher;
     private readonly SynchronizationContext _ui;
     private readonly CancellationTokenSource _cts = new();
@@ -38,6 +39,10 @@ internal sealed class TrayApp : ApplicationContext
         _statusItem = new ToolStripMenuItem("未连接") { Enabled = false };
         _pushItem = new ToolStripMenuItem("上传剪贴板图片", null, (_, _) => TogglePush()) { Checked = true };
         _historyItem = new ToolStripMenuItem("历史（最近 10 张）");
+        _autoStartItem = new ToolStripMenuItem("开机自启", null, (_, _) => ToggleAutoStart())
+        {
+            Checked = AutoStart.IsEnabled()
+        };
         var menu = new ContextMenuStrip();
         menu.Items.Add(_statusItem);
         menu.Items.Add(new ToolStripSeparator());
@@ -46,6 +51,7 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(_pushItem);
         menu.Items.Add(new ToolStripMenuItem("上传当前剪贴板", null, (_, _) => ManualUpload()));
         menu.Items.Add(_historyItem);
+        menu.Items.Add(_autoStartItem);
         menu.Items.Add(new ToolStripMenuItem("打开媒体文件夹", null, (_, _) => OpenFolder(AppLog.MediaRoot)));
         menu.Items.Add(new ToolStripMenuItem("打开日志", null, (_, _) => OpenFile(AppLog.LogPath)));
         menu.Items.Add(new ToolStripSeparator());
@@ -135,6 +141,16 @@ internal sealed class TrayApp : ApplicationContext
         }
         _lastPushedSha = image.Sha256;
         _ = Task.Run(() => PushAsync(image));
+    }
+
+    private void ToggleAutoStart()
+    {
+        var want = !_autoStartItem.Checked;
+        if (AutoStart.Set(want))
+        {
+            _autoStartItem.Checked = want;
+            ShowBalloon(want ? "已加入开机启动" : "已取消开机启动");
+        }
     }
 
     private void TogglePush()

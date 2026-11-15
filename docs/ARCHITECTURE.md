@@ -114,7 +114,7 @@ HEIC 风险：魅族相机若输出 HEIC，Windows 解码需要 HEIF 扩展。�
 ## 6. 魅族 / Flyme 专项
 
 - **权限**：`READ_MEDIA_IMAGES` 走 Shizuku `pm grant`（这是全量授权，不是 A14 的「部分照片」）。若被 ROM 打回，回退 `appops set <pkg> MANAGE_EXTERNAL_STORAGE allow` + FileObserver。
-- **保活**：Flyme 后台管理严格。需要「允许自启动」「允许后台运行」「耗电管理=允许后台高耗电」，并把 App 和 Shizuku 都加入后台锁定（最近任务下拉锁定）。
+- **保活**：Flyme 后台管理严格。需要「允许自启动」「允许后台运行」「耗电管理=允许后台高耗电」，并把 App 和 Shizuku 都加入后台锁定（最近任务下拉锁定）。App 声明了 `BOOT_COMPLETED` 接收器，开机后自动拉起 hub，但 Flyme 会按「自启动管理」决定是否放行，必须手动允许一次。
 - **Shizuku 本身**：Android 13 走无线调试启动；Flyme 可能杀 Shizuku 进程，同样加白名单。App 监听 Shizuku 状态变化并自动重跑 Grants。
 - **截图目录**：Flyme 一般在 `Pictures/Screenshots`，白名单同时包含 `DCIM/Screenshots` 以防版本差异。
 - **调试触发**：Flyme 的 `am` 在 `-a` 与 `-n` 同时出现时报 “Activity class does not exist”，隐式广播也会被后台限制。自动化统一走 `am broadcast -n io.kitsune.snap2board/.DebugReceiver -a io.kitsune.snap2board.SEND_LATEST_SCREENSHOT`；`DebugReceiver` 仅在 debuggable 构建里生效。
@@ -157,7 +157,7 @@ HEIC 风险：魅族相机若输出 HEIC，Windows 解码需要 HEIF 扩展。�
 - **M0 最小闭环**（已完成）：手机 FGS + 极简 HTTP `/health` `/pair/claim` `/items`；PC 网关发现 + 手动「发送最新截图」+ 剪贴板写入。已在 adb forward 与真实热点（网关 192.168.147.177）两条路径上验证。
 - **M1 自动化上行**（已完成）：MediaWatcher + 水位 + 防抖 + 去重；PC 侧 `since` 拉取 + 自动写剪贴板。实测截图后约 2 s 手机入队、PC 侧 1.5 s 内拉取并写剪贴板（无任何手动触发）。
 - **M2 反向**（已完成）：PC 剪贴板监听（`WM_CLIPBOARDUPDATE` + 250ms 防抖 + 剪贴板序号校验）→ `POST /upload` → 手机写入 `Pictures/Snap2Board`；回显由「像素哈希 + origin + owner 过滤」三重挡住。实测双向都在 2–3 s 内完成，且不会互相回弹。
-- **M3 打磨**：托盘历史/恢复（已完成）、断线补课（已完成）；剩余单实例、开机自启、TLS pinning、面板页。
+- **M3 打磨**：托盘历史/恢复、断线补课、开机自启（PC 托盘开关 + 手机开机广播）已完成；剩余 TLS pinning、面板页。
 
 ## 10. 目录结构
 
