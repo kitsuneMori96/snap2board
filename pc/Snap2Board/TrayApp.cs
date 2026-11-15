@@ -25,6 +25,21 @@ internal sealed class TrayApp : ApplicationContext
     private bool _connected;
     private bool _pushEnabled = true;
     private string _lastPushedSha = "";
+    private string _statusText = "未连接";
+    private DateTime? _lastSyncAt;
+    private PanelForm? _panel;
+
+    internal string StatusText => _statusText;
+
+    internal string StatusDetail
+    {
+        get
+        {
+            var sync = _lastSyncAt is { } at ? at.ToString("HH:mm:ss") : "—";
+            var origin = string.IsNullOrEmpty(_host) ? "—" : $"{_host}:{_config.Port}";
+            return $"hub {origin}   游标 #{_config.Cursor}   最近同步 {sync}";
+        }
+    }
 
     public TrayApp(CliOptions options)
     {
@@ -46,6 +61,7 @@ internal sealed class TrayApp : ApplicationContext
         var menu = new ContextMenuStrip();
         menu.Items.Add(_statusItem);
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(new ToolStripMenuItem("面板…", null, (_, _) => ShowPanel()));
         menu.Items.Add(new ToolStripMenuItem("配对…", null, (_, _) => PromptPair()));
         menu.Items.Add(new ToolStripMenuItem("立即同步", null, (_, _) => ManualSync()));
         menu.Items.Add(_pushItem);
@@ -65,13 +81,39 @@ internal sealed class TrayApp : ApplicationContext
             Visible = true,
             ContextMenuStrip = menu
         };
-        _tray.DoubleClick += (_, _) => OpenFolder(AppLog.MediaRoot);
+        _tray.DoubleClick += (_, _) => ShowPanel();
 
         AppLog.Info("托盘程序启动");
         _watcher = new ClipboardWatcher();
         _watcher.ImageCaptured += OnClipboardImage;
+        if (options.ShowPanel)
+        {
+            // 构造函数里还没有消息循环，等 Application.Run 起来再开窗
+            _ui.Post(_ => ShowPanel(), null);
+        }
         _ = Task.Run(() => PollLoopAsync(_cts.Token));
     }
+
+    internal void ShowPanel()
+    {
+        if (_panel == null || _panel.IsDisposed)
+        {
+            _panel = new PanelForm(this);
+        }
+        if (!_panel.Visible)
+        {
+            _panel.Show();
+        }
+        if (_panel.WindowState == FormWindowState.Minimized)
+        {
+            _panel.WindowState = FormWindowState.Normal;
+        }
+        _panel.Activate();
+    }
+
+    internal void OpenMediaFolder() => OpenFolder(AppLog.MediaRoot);
+
+    internal void OpenLogFile() => OpenFile(AppLog.LogPath);
 
     private void RebuildHistoryMenu()
     {
@@ -98,7 +140,7 @@ internal sealed class TrayApp : ApplicationContext
         _historyItem.DropDownItems.Add(new ToolStripMenuItem("恢复上一张", null, (_, _) => Restore(1)));
     }
 
-    private void Restore(int index)
+    internal void Restore(int index)
     {
         var entry = ClipboardHistory.Get(index);
         if (entry == null)
@@ -160,7 +202,7 @@ internal sealed class TrayApp : ApplicationContext
         AppLog.Info(_pushEnabled ? "剪贴板上传已开启" : "剪贴板上传已关闭");
     }
 
-    private void ManualUpload()
+    internal void ManualUpload()
     {
         if (!Clipboard.ContainsImage())
         {
@@ -315,6 +357,8 @@ internal sealed class TrayApp : ApplicationContext
             throw;
         }
 
+        _lastSyncAt = DateTime.Now;
+
         HubItem? newest = null;
         string? newestPath = null;
         var pulled = 0;
@@ -449,7 +493,7 @@ internal sealed class TrayApp : ApplicationContext
         }
     }
 
-    private void PromptPair()
+    internal void PromptPair()
     {
         using var dialog = new PairDialog();
         if (dialog.ShowDialog() == DialogResult.OK && dialog.Code.Length > 0)
@@ -490,7 +534,7 @@ internal sealed class TrayApp : ApplicationContext
         SetStatus("已配对");
     }
 
-    private void ManualSync()
+    internal void ManualSync()
     {
         _ = Task.Run(async () =>
         {
@@ -509,6 +553,7 @@ internal sealed class TrayApp : ApplicationContext
     {
         _ui.Post(_ =>
         {
+            _statusText = text;
             _statusItem.Text = text;
             var shortText = text.Length > 52 ? text[..52] : text;
             _tray.Text = $"Snap2Board · {shortText}";
@@ -554,6 +599,13 @@ internal sealed class TrayApp : ApplicationContext
     {
         _cts.Cancel();
         _watcher.Dispose();
+        if (_panel != null)
+        {
+            _panel.AllowClose();
+            _panel.StopTimer();
+            _panel.Close();
+            _panel.Dispose();
+        }
         _tray.Visible = false;
         _tray.Dispose();
         ExitThread();

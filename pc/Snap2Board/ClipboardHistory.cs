@@ -16,10 +16,12 @@ internal static class ClipboardHistory
 {
     private const int Max = 10;
     private static readonly object Gate = new();
-    private static readonly List<HistoryEntry> Items = Load();
-    private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
 
+    // 必须排在 Items 前面：静态字段按书写顺序初始化，Load() 里要用到它们
     public static string FilePath { get; } = System.IO.Path.Combine(AppLog.Root, "history.json");
+
+    private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
+    private static readonly List<HistoryEntry> Items = Load();
 
     public static IReadOnlyList<HistoryEntry> All()
     {

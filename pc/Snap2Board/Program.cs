@@ -2,13 +2,14 @@ using System.Windows.Forms;
 
 namespace Snap2Board;
 
-internal sealed record CliOptions(string? PairCode, string? Host, string? AutoStart)
+internal sealed record CliOptions(string? PairCode, string? Host, string? AutoStart, bool ShowPanel)
 {
     public static CliOptions Parse(string[] args)
     {
         string? pairCode = null;
         string? host = null;
         string? autoStart = null;
+        var showPanel = false;
         for (var i = 0; i < args.Length; i++)
         {
             switch (args[i])
@@ -22,9 +23,12 @@ internal sealed record CliOptions(string? PairCode, string? Host, string? AutoSt
                 case "--autostart" when i + 1 < args.Length:
                     autoStart = args[++i];
                     break;
+                case "--panel":
+                    showPanel = true;
+                    break;
             }
         }
-        return new CliOptions(pairCode, host, autoStart);
+        return new CliOptions(pairCode, host, autoStart, showPanel);
     }
 }
 

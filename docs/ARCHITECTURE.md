@@ -65,6 +65,7 @@
 - **ClipboardWriter**：独立 STA 线程 + 串行队列；`OpenClipboard` 失败重试 10×20ms。
 - **ClipboardWatcher**：隐藏窗口 + `AddClipboardFormatListener`，收 `WM_CLIPBOARDUPDATE`。
 - **Tray**：状态灯、最近 10 条、恢复上一份剪贴板、配对对话框、打开媒体文件夹、退出。
+- **PanelForm**：托盘双击或菜单「面板…」打开的窗口（`--panel` 可直接带窗启动）。顶部显示连接状态 / hub 地址 / 游标 / 最近同步时间，中部是历史列表（双击写回剪贴板），底部一排操作按钮（立即同步、恢复选中、配对、上传剪贴板、媒体文件夹）。1 s 定时刷新，关窗只是隐藏，托盘继续跑。
 - **Outbox**：PC→手机方向断线时的磁盘队列。
 
 ## 3. 协议
@@ -157,7 +158,7 @@ HEIC 风险：魅族相机若输出 HEIC，Windows 解码需要 HEIF 扩展。�
 - **M0 最小闭环**（已完成）：手机 FGS + 极简 HTTP `/health` `/pair/claim` `/items`；PC 网关发现 + 手动「发送最新截图」+ 剪贴板写入。已在 adb forward 与真实热点（网关 192.168.147.177）两条路径上验证。
 - **M1 自动化上行**（已完成）：MediaWatcher + 水位 + 防抖 + 去重；PC 侧 `since` 拉取 + 自动写剪贴板。实测截图后约 2 s 手机入队、PC 侧 1.5 s 内拉取并写剪贴板（无任何手动触发）。
 - **M2 反向**（已完成）：PC 剪贴板监听（`WM_CLIPBOARDUPDATE` + 250ms 防抖 + 剪贴板序号校验）→ `POST /upload` → 手机写入 `Pictures/Snap2Board`；回显由「像素哈希 + origin + owner 过滤」三重挡住。实测双向都在 2–3 s 内完成，且不会互相回弹。
-- **M3 打磨**：托盘历史/恢复、断线补课、开机自启（PC 托盘开关 + 手机开机广播）已完成；剩余 TLS pinning、面板页。
+- **M3 打磨**：托盘历史/恢复、断线补课、开机自启（PC 托盘开关 + 手机开机广播）、面板页已完成；剩余 TLS pinning。
 
 ## 10. 目录结构
 
