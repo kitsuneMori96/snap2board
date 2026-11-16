@@ -29,7 +29,8 @@ M3 进行中：托盘历史（最近 10 张，可一键写回剪贴板）、断�
 
 ```bash
 # Android（需要 JDK 17 + Android SDK 36）
-# 日常构建加 --offline：依赖已缓存时在线模式会先卡在 dl.google.com 超时（8 分钟+）
+# 日常构建加 --offline 最快；联网拉依赖时注意 Gradle 不读系统代理，
+# 需在 ~/.gradle/gradle.properties 配 systemProp.https.proxyHost/Port，否则直连 dl.google.com 会超时数分钟
 cd android && ./gradlew :app:assembleDebug --offline
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 # 发布包（R8 压缩，debug 密钥签名，可覆盖安装）
