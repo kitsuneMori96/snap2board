@@ -29,10 +29,11 @@ M3 进行中：托盘历史（最近 10 张，可一键写回剪贴板）、断�
 
 ```bash
 # Android（需要 JDK 17 + Android SDK 36）
-cd android && ./gradlew :app:assembleDebug
+# 日常构建加 --offline：依赖已缓存时在线模式会先卡在 dl.google.com 超时（8 分钟+）
+cd android && ./gradlew :app:assembleDebug --offline
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 # 发布包（R8 压缩，debug 密钥签名，可覆盖安装）
-./gradlew :app:assembleRelease   # 产物 app/build/outputs/apk/release/app-release.apk
+./gradlew :app:assembleRelease --offline   # 产物 app/build/outputs/apk/release/app-release.apk
 
 # Windows
 dotnet build pc/Snap2Board/Snap2Board.csproj -c Debug
