@@ -8,6 +8,10 @@
 
 设计与协议见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
+## 下载
+
+Windows 便携版（单文件、免安装、内置 .NET 运行时）：[最新 Release](https://github.com/kitsuneMori96/snap2board/releases/latest) 里的 `Snap2Board-win-x64.zip`。解压后双击 `Snap2Board.exe`，在托盘右键「配对…」输入手机上的 6 位码即可。
+
 ## 当前进度
 
 M0 已跑通：手机前台服务内嵌 HTTP hub（配对 / 列表 / 下载），电脑托盘自动发现网关、轮询拉取并写入剪贴板（DIB + PNG + FileDrop 三种格式）。已在真实热点下验证。
