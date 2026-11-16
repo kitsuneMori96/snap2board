@@ -10,13 +10,16 @@
 
 ## 下载
 
-Windows 便携版（单文件、免安装、内置 .NET 运行时）：[最新 Release](https://github.com/kitsuneMori96/snap2board/releases/latest) 里的 `Snap2Board-win-x64.zip`。解压后双击 `Snap2Board.exe`，在托盘右键「配对…」输入手机上的 6 位码即可。
+[最新 Release](https://github.com/kitsuneMori96/snap2board/releases/latest) 里有两个文件：
+
+- `Snap2Board-win-x64.zip`：Windows 便携版（单文件、免安装、内置 .NET 运行时）。解压后双击 `Snap2Board.exe`，托盘右键「配对…」输入手机上的 6 位码。
+- `Snap2Board-android.apk`：手机端 hub（Android 8+，无需 root，Shizuku 可选）。安装后允许通知与相册权限，点「启动服务」；已装旧版可直接覆盖安装。
 
 ## 当前进度
 
 M0 已跑通：手机前台服务内嵌 HTTP hub（配对 / 列表 / 下载），电脑托盘自动发现网关、轮询拉取并写入剪贴板（DIB + PNG + FileDrop 三种格式）。已在真实热点下验证。
 
-M1 已跑通：MediaStore 自动监听（水位 + 1.5 s 防抖 + sha256 去重），手机截图/拍照后无需任何操作，约 2–4 s 内自动出现在电脑剪贴板。Shizuku 授权入口已接好，用于补全量媒体权限与保活白名单。
+M1 已跑通：MediaStore 自动监听（水位 + 0.4 s 防抖 + sha256 去重），手机截图/拍照后无需任何操作，约 2–3 s 内自动出现在电脑剪贴板。Shizuku 授权入口已接好，用于补全量媒体权限与保活白名单。
 
 M2 已跑通：PC 复制图片后自动推到手机 `Pictures/Snap2Board` 相册；双向都有回显抑制，收到的图不会被再推回去。
 
@@ -28,6 +31,8 @@ M3 进行中：托盘历史（最近 10 张，可一键写回剪贴板）、断�
 # Android（需要 JDK 17 + Android SDK 36）
 cd android && ./gradlew :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
+# 发布包（R8 压缩，debug 密钥签名，可覆盖安装）
+./gradlew :app:assembleRelease   # 产物 app/build/outputs/apk/release/app-release.apk
 
 # Windows
 dotnet build pc/Snap2Board/Snap2Board.csproj -c Debug

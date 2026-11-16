@@ -111,6 +111,7 @@ class MediaWatcher(
     }
 
     companion object {
-        private const val DEBOUNCE_MS = 1500L
+        // 截图落盘后尽快进队列；400ms 足够合并相机/系统的一次突发写入
+        private const val DEBOUNCE_MS = 400L
     }
 }

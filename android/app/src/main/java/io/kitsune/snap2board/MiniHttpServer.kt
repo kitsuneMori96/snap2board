@@ -2,6 +2,7 @@ package io.kitsune.snap2board
 
 import android.util.Log
 import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
@@ -10,6 +11,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 class HttpRequest(
@@ -22,10 +24,12 @@ class HttpRequest(
     fun header(name: String): String? = headers[name.lowercase()]
 }
 
+/** forceClose：大文件流式响应后直接断连，避免长度不符时把下一条请求读串。 */
 class HttpResponse(
     val code: Int,
     val contentType: String,
     val length: Long,
+    val forceClose: Boolean = false,
     val writer: (OutputStream) -> Unit
 ) {
     companion object {
@@ -37,17 +41,23 @@ class HttpResponse(
         fun bytes(code: Int, mime: String, data: ByteArray): HttpResponse =
             HttpResponse(code, mime, data.size.toLong()) { it.write(data) }
 
-        fun stream(mime: String, length: Long, writer: (OutputStream) -> Unit): HttpResponse =
-            HttpResponse(200, mime, length, writer)
+        fun stream(mime: String, length: Long, forceClose: Boolean = false, writer: (OutputStream) -> Unit): HttpResponse =
+            HttpResponse(200, mime, length, forceClose, writer)
     }
 }
 
 class MiniHttpServer(private val port: Int, private val handler: (HttpRequest) -> HttpResponse) {
 
+    private companion object {
+        const val FIRST_REQUEST_TIMEOUT_MS = 20000
+        const val KEEP_ALIVE_IDLE_MS = 15000
+    }
+
     private var serverSocket: ServerSocket? = null
     private val workers = Executors.newCachedThreadPool { runnable ->
         Thread(runnable, "s2b-conn").apply { isDaemon = true }
     }
+    private val clients = ConcurrentHashMap.newKeySet<Socket>()
 
     @Volatile
     var running = false
@@ -70,6 +80,9 @@ class MiniHttpServer(private val port: Int, private val handler: (HttpRequest) -
         } catch (_: Exception) {
         }
         serverSocket = null
+        // 长连接不会随 ServerSocket 关闭而断，得逐个关掉才能让 worker 立刻退出
+        clients.forEach { runCatching { it.close() } }
+        clients.clear()
         workers.shutdownNow()
     }
 
@@ -89,9 +102,12 @@ class MiniHttpServer(private val port: Int, private val handler: (HttpRequest) -
             }
             try {
                 client.tcpNoDelay = true
+                client.sendBufferSize = 256 * 1024
+                clients.add(client)
                 workers.execute { serve(client) }
             } catch (t: Throwable) {
                 Log.w("Snap2Board", "派发连接失败: ${t.message}")
+                clients.remove(client)
                 runCatching { client.close() }
             }
         }
@@ -99,52 +115,62 @@ class MiniHttpServer(private val port: Int, private val handler: (HttpRequest) -
 
     private fun serve(socket: Socket) {
         try {
-            socket.soTimeout = 20000
+            socket.soTimeout = FIRST_REQUEST_TIMEOUT_MS
             val input = BufferedInputStream(socket.getInputStream())
-            val requestLine = readLine(input) ?: return
-            val parts = requestLine.split(' ')
-            if (parts.size < 2) return
-            val method = parts[0].uppercase()
-            val target = parts[1]
+            val output = BufferedOutputStream(socket.getOutputStream())
+            // PC 每 2 秒轮询一次 items，复用连接能省掉大量握手和 TIME_WAIT
+            while (running) {
+                val requestLine = readLine(input) ?: break
+                val parts = requestLine.split(' ')
+                if (parts.size < 2) break
+                val method = parts[0].uppercase()
+                val target = parts[1]
 
-            val headers = mutableMapOf<String, String>()
-            while (true) {
-                val line = readLine(input) ?: break
-                if (line.isEmpty()) break
-                val colon = line.indexOf(':')
-                if (colon > 0) {
-                    headers[line.substring(0, colon).trim().lowercase()] = line.substring(colon + 1).trim()
+                val headers = mutableMapOf<String, String>()
+                while (true) {
+                    val line = readLine(input) ?: return
+                    if (line.isEmpty()) break
+                    val colon = line.indexOf(':')
+                    if (colon > 0) {
+                        headers[line.substring(0, colon).trim().lowercase()] = line.substring(colon + 1).trim()
+                    }
                 }
-            }
 
-            val contentLength = headers["content-length"]?.toLongOrNull() ?: 0L
-            val body = if (contentLength > 0) {
-                val data = ByteArray(contentLength.toInt())
-                var offset = 0
-                while (offset < data.size) {
-                    val read = input.read(data, offset, data.size - offset)
-                    if (read < 0) break
-                    offset += read
+                val contentLength = headers["content-length"]?.toLongOrNull() ?: 0L
+                val body = if (contentLength > 0) {
+                    val data = ByteArray(contentLength.toInt())
+                    var offset = 0
+                    while (offset < data.size) {
+                        val read = input.read(data, offset, data.size - offset)
+                        if (read < 0) break
+                        offset += read
+                    }
+                    data
+                } else {
+                    ByteArray(0)
                 }
-                data
-            } else {
-                ByteArray(0)
-            }
 
-            val question = target.indexOf('?')
-            val path = if (question >= 0) target.substring(0, question) else target
-            val query = if (question >= 0) parseQuery(target.substring(question + 1)) else emptyMap()
+                val question = target.indexOf('?')
+                val path = if (question >= 0) target.substring(0, question) else target
+                val query = if (question >= 0) parseQuery(target.substring(question + 1)) else emptyMap()
 
-            val response = try {
-                handler(HttpRequest(method, path, query, headers, body))
-            } catch (t: Throwable) {
-                Log.e("Snap2Board", "handler error", t)
-                HttpResponse.json(500, "{\"error\":\"internal\"}")
+                val response = try {
+                    handler(HttpRequest(method, path, query, headers, body))
+                } catch (t: Throwable) {
+                    Log.e("Snap2Board", "handler error", t)
+                    HttpResponse.json(500, "{\"error\":\"internal\"}")
+                }
+
+                var keepAlive = headers["connection"]?.equals("close", ignoreCase = true) != true
+                if (response.forceClose) keepAlive = false
+                writeResponse(output, response, keepAlive)
+                if (!keepAlive) break
+                socket.soTimeout = KEEP_ALIVE_IDLE_MS
             }
-            writeResponse(socket.getOutputStream(), response)
         } catch (e: Exception) {
             Log.w("Snap2Board", "serve error: ${e.message}")
         } finally {
+            clients.remove(socket)
             try {
                 socket.close()
             } catch (_: Exception) {
@@ -152,11 +178,11 @@ class MiniHttpServer(private val port: Int, private val handler: (HttpRequest) -
         }
     }
 
-    private fun writeResponse(out: OutputStream, response: HttpResponse) {
+    private fun writeResponse(out: OutputStream, response: HttpResponse, keepAlive: Boolean) {
         val head = "HTTP/1.1 ${response.code} ${reason(response.code)}\r\n" +
             "Content-Type: ${response.contentType}\r\n" +
             "Content-Length: ${response.length}\r\n" +
-            "Connection: close\r\n" +
+            "Connection: ${if (keepAlive) "keep-alive" else "close"}\r\n" +
             "Cache-Control: no-store\r\n\r\n"
         out.write(head.toByteArray(StandardCharsets.US_ASCII))
         response.writer(out)

@@ -13,18 +13,30 @@ android {
         applicationId = "io.kitsune.snap2board"
         minSdk = 29
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.4.0"
+        versionCode = 9
+        versionName = "0.9.0"
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+            // 沿用 debug 签名，已装的调试版可以直接覆盖升级，不用先卸载
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
     buildFeatures {
         buildConfig = true
+    }
+
+    // release 打包不跑 lintVital：它要现拉 lint-gradle，国内网络经常超时
+    lint {
+        checkReleaseBuilds = false
     }
 
     compileOptions {

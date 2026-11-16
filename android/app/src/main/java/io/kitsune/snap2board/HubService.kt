@@ -289,8 +289,15 @@ class HubService : Service() {
         } ?: return notFound()
 
         if (entry.size > 0) {
-            return HttpResponse.stream(entry.mime, entry.size) { output ->
-                stream.use { it.copyTo(output) }
+            return HttpResponse.stream(entry.mime, entry.size, forceClose = true) { output ->
+                stream.use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        output.write(buffer, 0, read)
+                    }
+                }
             }
         }
         val data = stream.use { it.readBytes() }

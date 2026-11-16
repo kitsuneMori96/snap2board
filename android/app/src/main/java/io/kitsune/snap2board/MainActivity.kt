@@ -22,6 +22,8 @@ class MainActivity : Activity() {
     private lateinit var codeView: TextView
     private lateinit var shizukuView: TextView
     private lateinit var logView: TextView
+    private val prefs by lazy { Prefs(this) }
+    private var logLineCount = 0
     private val handler = Handler(Looper.getMainLooper())
     private val logListener: (String) -> Unit = { line ->
         runOnUiThread { appendLog(line) }
@@ -83,7 +85,7 @@ class MainActivity : Activity() {
         root.addView(button("发送最新截图") { dispatch(HubService.ACTION_SEND_SCREENSHOT) })
         root.addView(button("发送最新照片") { dispatch(HubService.ACTION_SEND_PHOTO) })
         root.addView(button("重新生成配对码") {
-            Prefs(this).regeneratePairCode()
+            prefs.regeneratePairCode()
             HubLog.log("配对码已重生成")
             refresh()
         })
@@ -180,7 +182,7 @@ class MainActivity : Activity() {
     }
 
     private fun refresh() {
-        val port = Prefs(this).port
+        val port = prefs.port
         val running = HubService.running
         statusView.text = buildString {
             append(if (running) "服务运行中" else "服务未运行")
@@ -188,15 +190,25 @@ class MainActivity : Activity() {
             HubService.lastError?.let { append(" · 错误: $it") }
         }
         shizukuView.text = ShizukuGrants.status()
-        codeView.text = Prefs(this).pairCode
+        codeView.text = prefs.pairCode
     }
 
+    // 日志面板常开时不能无限长，超过 400 行只留最近 250 行
     private fun appendLog(lines: List<String>) {
         if (lines.isEmpty()) return
-        logView.append(lines.joinToString("\n") + "\n")
+        appendBlock(lines.joinToString("\n") + "\n")
     }
 
     private fun appendLog(line: String) {
-        logView.append(line + "\n")
+        appendBlock(line + "\n")
+    }
+
+    private fun appendBlock(block: String) {
+        logView.append(block)
+        logLineCount += block.count { it == '\n' }
+        if (logLineCount <= 400) return
+        val kept = logView.text.split('\n').takeLast(250).joinToString("\n")
+        logView.text = kept
+        logLineCount = kept.count { it == '\n' }
     }
 }

@@ -86,6 +86,7 @@ GET  /api/v1/items/{id}/content         → 原始字节
 
 - **幂等键是 `sha256`**，重传无害；`seq` 只用于游标。
 - 上行（手机→PC）走 `items?since=` 轮询；下行（PC→手机）走 `POST /upload` 直推，语义等价于「把这张图放进相册」。没做 WS：v1 的轮询延迟已经 2s 内，WS 只是锦上添花。
+- **连接复用**：JSON 接口默认 `Connection: keep-alive`（空闲 15 s 断开），电脑 2 s 一次的轮询共用一条 TCP；`/content` 大图仍是一张一连接、响应后即关，避免长度不符时把下一条请求读串。
 - `origin` 区分来源：`android`（手机产生）与 `windows`（PC 推过去的）。PC 拉到 `windows` 条目只推进游标，不写剪贴板。
 - 配对：手机界面显示 6 位码，PC 托盘输入；PC 地址自动取网关，无需手填。
 - 手机热点本身是 WPA2 加密 + token 鉴权，v1 走 HTTP 可接受；TLS（自签 + App 内 pinning）列入 v2。
@@ -94,7 +95,7 @@ GET  /api/v1/items/{id}/content         → 原始字节
 
 - **首发不灌历史**：安装后首次启动把水位设为 `MAX(_id)`。`上传最近 24h` 作为可选开关，默认关。
 - **路径白名单**：`DCIM/Camera/`、`Pictures/Screenshots/`、`DCIM/Screenshots/`，可配置。
-- **防抖**：相机写盘会连发多次 UPDATE，回调合并 1.5s，并校验文件大小稳定后再读。
+- **防抖**：相机写盘会连发多次 UPDATE，回调合并 0.4s，并校验文件大小稳定后再读。
 - **回声抑制三闸**（实测生效）：
   1. 手机侧查询带 `owner_package_name != 本包`，PC 推来的图由本包写入，永远不进上报队列；
   2. 手机侧路径白名单只认 `DCIM/Camera/` 与 `*/Screenshots/`，落进 `Pictures/Snap2Board/` 的图不在范围内；
