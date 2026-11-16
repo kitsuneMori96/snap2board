@@ -55,7 +55,8 @@ object MediaPicks {
         }
         val args = arrayOf(
             sinceId.toString(),
-            "DCIM/Camera/%",
+            // 魅族相机把照片直接落在 DCIM/ 根目录（P2026….jpg），不是 DCIM/Camera/
+            "DCIM/%",
             "%/Screenshots/%",
             context.packageName
         )
