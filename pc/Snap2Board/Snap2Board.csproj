@@ -9,6 +9,7 @@
     <AssemblyName>Snap2Board</AssemblyName>
     <RootNamespace>Snap2Board</RootNamespace>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <InvariantGlobalization>true</InvariantGlobalization>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>assets\app.ico</ApplicationIcon>
   </PropertyGroup>

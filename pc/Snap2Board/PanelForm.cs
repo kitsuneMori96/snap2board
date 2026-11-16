@@ -16,7 +16,10 @@ internal sealed class PanelForm : Form
     private readonly GroupBox _previewGroup = new();
     private readonly Dictionary<string, Image> _thumbCache = new();
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 1000 };
+    private readonly System.Windows.Forms.Timer _resizeTimer = new() { Interval = 250 };
     private string _listSignature = "";
+    private string? _previewPath;
+    private Size _previewSourceSize;
     private bool _allowClose;
     private bool _splitInitialized;
     private bool _adjustingSplit;
@@ -166,6 +169,17 @@ internal sealed class PanelForm : Form
         Controls.Add(root);
 
         _timer.Tick += (_, _) => RefreshView();
+        _resizeTimer.Tick += (_, _) =>
+        {
+            _resizeTimer.Stop();
+            if (Visible) ReloadPreview();
+        };
+        _preview.SizeChanged += (_, _) =>
+        {
+            if (!Visible || _previewPath == null) return;
+            _resizeTimer.Stop();
+            _resizeTimer.Start();
+        };
         _timer.Start();
         RefreshView();
     }
@@ -298,28 +312,58 @@ internal sealed class PanelForm : Form
 
     private void UpdatePreview()
     {
-        Image? image = null;
         var index = SelectedIndex();
-        if (index >= 0 && ClipboardHistory.Get(index) is { } entry && File.Exists(entry.Path))
+        var path = index >= 0 && ClipboardHistory.Get(index) is { } entry && File.Exists(entry.Path)
+            ? entry.Path
+            : null;
+        if (path == _previewPath && _preview.Image != null) return;
+        _previewPath = path;
+        ReloadPreview();
+    }
+
+    private void ReloadPreview()
+    {
+        Image? image = null;
+        _previewSourceSize = Size.Empty;
+        if (_previewPath is { } path && File.Exists(path))
         {
             try
             {
-                using var stream = new MemoryStream(File.ReadAllBytes(entry.Path));
+                using var stream = new MemoryStream(File.ReadAllBytes(path));
                 using var source = Image.FromStream(stream);
-                // 拷一份出来，别让 GDI+ 继续依赖这个流
-                image = new Bitmap(source);
+                _previewSourceSize = source.Size;
+                // 只保留按窗格尺寸缩放后的位图，别把原始大图一直挂在这里
+                var box = _preview.ClientSize;
+                if (box.Width < 120 || box.Height < 120) box = new Size(900, 560);
+                image = FitPreview(source, box);
             }
             catch (Exception ex)
             {
-                AppLog.Info($"预览加载失败 {entry.Name}: {ex.Message}");
+                AppLog.Info($"预览加载失败 {Path.GetFileName(path)}: {ex.Message}");
             }
         }
         var old = _preview.Image;
         _preview.Image = image;
         old?.Dispose();
 
-        _previewGroup.Text = image == null ? "选中预览" : $"选中预览  {image.Width}×{image.Height}";
+        _previewGroup.Text = image == null
+            ? "选中预览"
+            : $"选中预览  {_previewSourceSize.Width}×{_previewSourceSize.Height}";
         ApplyAdaptivePreview();
+    }
+
+    // 等比缩放到预览格内，缩小解码结果以省内存；不放大
+    private static Bitmap FitPreview(Image source, Size box)
+    {
+        var scale = Math.Min(1.0, Math.Min((double)box.Width / source.Width, (double)box.Height / source.Height));
+        var w = Math.Max(1, (int)Math.Round(source.Width * scale));
+        var h = Math.Max(1, (int)Math.Round(source.Height * scale));
+        var bitmap = new Bitmap(w, h);
+        using var g = Graphics.FromImage(bitmap);
+        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+        g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+        g.DrawImage(source, 0, 0, w, h);
+        return bitmap;
     }
 
     private void ApplyAdaptivePreview()
@@ -406,6 +450,34 @@ internal sealed class PanelForm : Form
         return bitmap;
     }
 
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        if (Visible)
+        {
+            _timer.Start();
+            RefreshView();
+            ReloadPreview();
+            return;
+        }
+
+        // 面板收起来后不常驻大图/缩略图，也不每秒刷新
+        _timer.Stop();
+        _resizeTimer.Stop();
+        var image = _preview.Image;
+        _preview.Image = null;
+        image?.Dispose();
+        _previewPath = null;
+        _previewGroup.Text = "选中预览";
+        foreach (var thumb in _thumbCache.Values)
+        {
+            if (!ReferenceEquals(thumb, _placeholder)) thumb.Dispose();
+        }
+        _thumbCache.Clear();
+        _listSignature = "";
+        GC.Collect(2, GCCollectionMode.Aggressive, true, true);
+    }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         if (!_allowClose && e.CloseReason == CloseReason.UserClosing)
@@ -426,6 +498,8 @@ internal sealed class PanelForm : Form
     {
         _timer.Stop();
         _timer.Dispose();
+        _resizeTimer.Stop();
+        _resizeTimer.Dispose();
         _preview.Image?.Dispose();
         foreach (var thumb in _thumbCache.Values)
         {
