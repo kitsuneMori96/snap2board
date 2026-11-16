@@ -62,6 +62,9 @@ internal static class Program
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) => AppLog.Info($"UI 未处理异常: {e.Exception}");
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => AppLog.Info($"未处理异常: {e.ExceptionObject}");
         Application.Run(new TrayApp(options));
     }
 }
