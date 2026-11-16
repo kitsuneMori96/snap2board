@@ -12,10 +12,16 @@ internal sealed class PanelForm : Form
     private readonly Label _detailLabel = new();
     private readonly DataGridView _grid = new();
     private readonly PictureBox _preview = new();
+    private readonly SplitContainer _split = new();
+    private readonly GroupBox _previewGroup = new();
     private readonly Dictionary<string, Image> _thumbCache = new();
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 1000 };
     private string _listSignature = "";
     private bool _allowClose;
+    private bool _splitInitialized;
+    private bool _adjustingSplit;
+    private bool _autoExpanded;
+    private bool? _previewWide;
     private Image? _placeholder;
 
     public PanelForm(TrayApp app)
@@ -26,9 +32,9 @@ internal sealed class PanelForm : Form
         AutoScaleMode = AutoScaleMode.None;
         Font = new Font("Microsoft YaHei UI", 9f);
         Text = "Snap2Board";
-        Width = 760;
-        Height = 600;
-        MinimumSize = new Size(460, 360);
+        Width = 900;
+        Height = 620;
+        MinimumSize = new Size(560, 380);
         StartPosition = FormStartPosition.CenterScreen;
         Icon = AppIcon.Get();
 
@@ -112,25 +118,22 @@ internal sealed class PanelForm : Form
         _preview.BackColor = Color.FromArgb(246, 246, 246);
         _preview.Margin = new Padding(0);
 
-        var previewGroup = new GroupBox
-        {
-            Text = "选中预览",
-            Dock = DockStyle.Fill,
-            Padding = new Padding(8),
-            Margin = new Padding(6, 0, 12, 8)
-        };
+        var previewGroup = _previewGroup;
+        previewGroup.Text = "选中预览";
+        previewGroup.Dock = DockStyle.Fill;
+        previewGroup.Padding = new Padding(8);
+        previewGroup.Margin = new Padding(0);
         previewGroup.Controls.Add(_preview);
 
-        var lists = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
-        lists.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        lists.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
-        lists.Controls.Add(listGroup, 0, 0);
-        lists.Controls.Add(previewGroup, 1, 0);
-        lists.Resize += (_, _) =>
-        {
-            var previewWidth = Math.Max(200, (int)(lists.ClientSize.Width * 0.3));
-            lists.ColumnStyles[1].Width = previewWidth;
-        };
+        // 预览栏宽度可拖；横屏图选中时自动加宽，避免图缩在窄栏里
+        _split.Dock = DockStyle.Fill;
+        _split.Orientation = Orientation.Vertical;
+        _split.SplitterWidth = 6;
+        _split.Panel1.Padding = new Padding(12, 0, 3, 8);
+        _split.Panel2.Padding = new Padding(3, 0, 12, 8);
+        _split.Panel1.Controls.Add(listGroup);
+        _split.Panel2.Controls.Add(previewGroup);
+        _split.Resize += (_, _) => RescaleWidePreview();
 
         var buttons = new FlowLayoutPanel
         {
@@ -146,7 +149,7 @@ internal sealed class PanelForm : Form
         buttons.Controls.Add(MakeButton("媒体文件夹", () => _app.OpenMediaFolder()));
 
         var body = new Panel { Dock = DockStyle.Fill, Padding = new Padding(12, 0, 12, 0) };
-        body.Controls.Add(lists);
+        body.Controls.Add(_split);
 
         var root = new TableLayoutPanel
         {
@@ -239,6 +242,60 @@ internal sealed class PanelForm : Form
         return signature;
     }
 
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        InitSplit();
+    }
+
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        if (!_splitInitialized) InitSplit();
+    }
+
+    private void InitSplit()
+    {
+        var width = _split.ClientSize.Width;
+        if (width <= 200) return;
+        try
+        {
+            var distance = Math.Clamp((int)(width * 0.66), 25, width - 25 - _split.SplitterWidth);
+            _split.SplitterDistance = distance;
+            _splitInitialized = true;
+            _previewWide = null;
+            ApplyAdaptivePreview();
+        }
+        catch (Exception ex) when (ex is ArgumentOutOfRangeException or InvalidOperationException)
+        {
+            AppLog.Info($"分栏初始化失败: {ex.Message}");
+        }
+    }
+
+    private void ApplyPreviewRatio(double previewRatio)
+    {
+        var width = _split.ClientSize.Width;
+        if (width <= 0) return;
+        var max = width - _split.Panel2MinSize - _split.SplitterWidth;
+        if (max <= _split.Panel1MinSize) return;
+        var distance = (int)(width * (1 - previewRatio));
+        distance = Math.Clamp(distance, _split.Panel1MinSize, max);
+        if (distance == _split.SplitterDistance) return;
+        _adjustingSplit = true;
+        try
+        {
+            _split.SplitterDistance = distance;
+        }
+        catch (Exception ex) when (ex is ArgumentOutOfRangeException or InvalidOperationException)
+        {
+            AppLog.Info($"调整预览栏宽度失败: {ex.Message}");
+        }
+        finally
+        {
+            _adjustingSplit = false;
+        }
+    }
+
     private void UpdatePreview()
     {
         Image? image = null;
@@ -260,6 +317,45 @@ internal sealed class PanelForm : Form
         var old = _preview.Image;
         _preview.Image = image;
         old?.Dispose();
+
+        _previewGroup.Text = image == null ? "选中预览" : $"选中预览  {image.Width}×{image.Height}";
+        ApplyAdaptivePreview();
+    }
+
+    private void ApplyAdaptivePreview()
+    {
+        var image = _preview.Image;
+        if (image == null || !_splitInitialized) return;
+        var wide = image.Width >= image.Height * 1.25;
+        if (_previewWide == wide) return;
+        _previewWide = wide;
+        if (wide)
+        {
+            _autoExpanded = true;
+            ApplyPreviewRatio(WidePreviewRatio((double)image.Width / image.Height));
+        }
+        else if (_autoExpanded)
+        {
+            _autoExpanded = false;
+            ApplyPreviewRatio(0.34);
+        }
+    }
+
+    // 横屏图想要刚好填满预览格高度，同时给列表留够 400px
+    private double WidePreviewRatio(double aspect)
+    {
+        var width = Math.Max(1, _split.ClientSize.Width);
+        var paneHeight = Math.Max(1, _preview.ClientSize.Height);
+        var want = paneHeight * 0.92 * aspect / width;
+        var max = Math.Max(0.45, Math.Min(0.75, 1.0 - 400.0 / width));
+        return Math.Clamp(want, 0.45, max);
+    }
+
+    private void RescaleWidePreview()
+    {
+        if (!_splitInitialized || _adjustingSplit || !_autoExpanded || _previewWide != true) return;
+        if (_preview.Image is not { } image) return;
+        ApplyPreviewRatio(WidePreviewRatio((double)image.Width / image.Height));
     }
 
     private Image ThumbFor(HistoryEntry entry)
